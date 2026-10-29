@@ -25,19 +25,28 @@ The five supplied price lists are intentionally **not** pre-imported: their colu
 
 The container applies the Alembic migration before starting the API. For local setup, run `alembic upgrade head` once after configuring `DATABASE_URL`. `migrations/001_initial.sql` is also provided as a plain-SQL initial schema for manual provisioning. Do not apply the initial baseline over an existing populated database. Future schema changes should be added as new Alembic revisions.
 
-## Render deployment
+## Free Render + Neon test deployment
 
-1. Push this project to a private GitHub repository. Do not add credentials, `.env`, product/customer exports, or database backups.
-2. In Render, choose **New → Blueprint** and select the repository. `render.yaml` provisions a Docker web service and persistent PostgreSQL database.
-3. Set `BOT_TOKEN` in the Render dashboard after creating the bot with BotFather. Add the current service's public HTTPS URL as `WEBHOOK_URL` if the blueprint's default URL differs.
-4. Deploy. The service runs database schema initialization, configures the Telegram webhook, and serves `/healthz` for Render liveness checks. `/health` is protected by `X-Health-Token`.
-5. Set the generated admin key and health token in the Render environment dashboard if you want to replace the blueprint-generated values. Never expose them in URLs or client-side code.
+For a no-cost test setup, use a Render Free Docker web service with a Neon Free PostgreSQL database. The app's `render.yaml` defines a Free web service and does not create a paid Render database; provide Neon’s connection string as `DATABASE_URL`. Render Free services can sleep when idle, and Neon Free compute scales to zero. This setup is for testing, not production uptime or guaranteed data recovery. Review the current [Render Free limitations](https://render.com/docs/free) and [Neon plan limits](https://neon.com/pricing).
+
+1. Keep the GitHub repository free of `.env`, tokens, passwords, customer exports, and Excel workbooks.
+2. Create a Neon project. Choose the Singapore region if available for your Render service.
+3. In Neon, open **Connect**, select your database/user, enable connection pooling, and copy its PostgreSQL connection string. Keep it private.
+4. In Render, create a **Blueprint** from this repository if the Blueprint option is available. The included `render.yaml` defines a Free Docker web service. Do not create a paid Render Postgres database for this setup. Alternatively, create a Docker **Web Service** on the Free plan manually.
+5. Set `DATABASE_URL` to the Neon connection string, plus generated `ADMIN_API_KEY` and `HEALTH_CHECK_TOKEN`. Add `WEBHOOK_SECRET` using Render's **Generate** option. Initially leave `BOT_TOKEN` unset so the app can deploy before its public URL is known.
+6. Deploy and wait for the service to become Live. Copy the exact Render HTTPS service URL; confirm `/healthz` returns `{"status":"ok"}`.
+7. Set `WEBHOOK_URL` to that exact HTTPS URL and add `BOT_TOKEN` from BotFather. Use a newly generated token; revoke any token previously shared in chat. Save the settings and wait for Render to redeploy.
+8. Open `/admin` to import parties/products, then configure an approved salesperson with authorized party/brand assignments before testing `/order` in Telegram.
+
+The app normalizes Neon’s `postgresql://` URL for SQLAlchemy/asyncpg and converts `sslmode=require` into the asyncpg `ssl=require` option.
+
+Render Free web services sleep after 15 minutes without traffic and can take about a minute to wake. Neon Free compute also suspends after inactivity. Free plans have usage and reliability limits; check provider dashboards regularly. For production, use paid hosting/database plans and a verified backup/recovery process. Do not expose secrets in URLs, source files, screenshots, or chat messages.
 
 The Telegram secret is read from the environment, used as the webhook path component and checked again against Telegram's webhook secret header. Do not paste bot tokens into source files, commits, tickets, or logs. Rotate a token if it is accidentally disclosed.
 
 ### PostgreSQL backups and recovery
 
-Use Render's database backup/PITR facilities for routine recovery where available. For an additional portable backup, run from a trusted machine with PostgreSQL client tools and a protected database URL:
+If using a paid Render Postgres database, use Render's backup/PITR facilities where available. For the free Render + Neon test setup, Neon Free has limited recovery features; export important data and keep a separate protected backup. For an additional portable PostgreSQL backup, run from a trusted machine with PostgreSQL client tools and a protected database URL:
 
 ```powershell
 $env:PGPASSWORD = "your-database-password"

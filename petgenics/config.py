@@ -1,9 +1,23 @@
 import os
 from dataclasses import dataclass
 
+from sqlalchemy.engine import make_url
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _normalize_database_url(database_url: str) -> str:
+    url = make_url(database_url)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+asyncpg")
+
+    query = dict(url.query)
+    sslmode = query.pop("sslmode", None)
+    query.pop("channel_binding", None)
+    if sslmode is not None:
+        query.setdefault("ssl", sslmode)
+    return url.set(query=query).render_as_string(hide_password=False)
 
 
 @dataclass(frozen=True)
@@ -22,13 +36,10 @@ class Settings:
 
 
 def get_settings() -> Settings:
-    database_url = os.getenv("DATABASE_URL", "")
-    if not database_url:
+    raw_database_url = os.getenv("DATABASE_URL", "")
+    if not raw_database_url:
         raise RuntimeError("DATABASE_URL must be set to a persistent PostgreSQL database.")
-    if database_url.startswith("postgres://"):
-        database_url = "postgresql+asyncpg://" + database_url.removeprefix("postgres://")
-    elif database_url.startswith("postgresql://"):
-        database_url = "postgresql+asyncpg://" + database_url.removeprefix("postgresql://")
+    database_url = _normalize_database_url(raw_database_url)
     return Settings(
         bot_token=os.getenv("BOT_TOKEN") or None,
         webhook_secret=os.getenv("WEBHOOK_SECRET", ""),

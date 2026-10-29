@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_mock_engine
 
 from petgenics.api import create_app
-from petgenics.config import Settings
+from petgenics.config import Settings, _normalize_database_url
 from petgenics.excel_io import preview_workbook, read_mapped_rows, workbook_bytes
 from petgenics.imports import duplicate_code_rows
 from petgenics.marg import order_rows, validate_mapping
@@ -19,6 +19,22 @@ from petgenics.scanner import extract_document, match_lines
 
 def test_decimal_order_total_and_discount_rounding():
     assert line_total(Decimal("3"), Decimal("10.10"), Decimal("12.5")) == Decimal("26.51")
+
+
+def test_neon_database_url_is_normalized_for_asyncpg_ssl():
+    url = _normalize_database_url(
+        "postgresql://user:secret@ep-example.neon.tech/petgenics"
+        "?sslmode=require&channel_binding=require"
+    )
+    assert url.startswith("postgresql+asyncpg://user:secret@ep-example.neon.tech/petgenics?")
+    assert "ssl=require" in url
+    assert "sslmode=" not in url
+    assert "channel_binding=" not in url
+
+
+def test_render_postgres_url_is_converted_without_changing_database():
+    url = _normalize_database_url("postgres://user:secret@db.internal:5432/petgenics")
+    assert url == "postgresql+asyncpg://user:secret@db.internal:5432/petgenics"
 
 
 def test_negative_quantity_and_out_of_range_discount_are_rejected():
