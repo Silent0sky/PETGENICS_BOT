@@ -47,7 +47,7 @@ The Telegram secret is read from the environment, used as the webhook path compo
 
 ### Telegram admin menu
 
-Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` to review and decide orders, approve/deactivate salespeople, import product/party/assignment workbooks, download full lists and date-wise reports, and receive per-order PDF/internal Excel exports in Telegram. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. Use `/myid` to find your Telegram user ID. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
+Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` to review and decide orders, approve/deactivate salespeople, import product/party/assignment workbooks, download full lists and date-wise reports, and receive per-order PDF/internal Excel exports in Telegram. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. `/adminpermission ID yes/no MAX_DISCOUNT yes/no` sets salesperson discount and free-quantity permissions. Use `/myid` to find your Telegram user ID. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
 
 ### PostgreSQL backups and recovery
 

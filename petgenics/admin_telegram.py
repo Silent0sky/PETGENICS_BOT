@@ -100,6 +100,53 @@ async def admin_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def admin_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(context, update.effective_user.id):
+        await update.effective_message.reply_text("Administrator access is required.")
+        return
+    if len(context.args) != 4:
+        await update.effective_message.reply_text(
+            "Use /adminpermission TELEGRAM_ID discount_yes_no max_discount_percent free_quantity_yes_no\n"
+            "Example: /adminpermission 123456789 yes 5 no"
+        )
+        return
+    try:
+        telegram_user_id = int(context.args[0])
+        discount_permission = context.args[1].casefold()
+        discount_text = context.args[2]
+        free_permission = context.args[3].casefold()
+        max_discount = Decimal(discount_text)
+        if discount_permission not in {"yes", "no"} or free_permission not in {"yes", "no"}:
+            raise ValueError
+        if telegram_user_id <= 0 or not Decimal("0") <= max_discount <= Decimal("100"):
+            raise ValueError
+        if max_discount.as_tuple().exponent < -2:
+            raise ValueError
+        allow_discount = discount_permission == "yes"
+        allow_free_quantity = free_permission == "yes"
+    except (ValueError, ArithmeticError):
+        await update.effective_message.reply_text(
+            "Invalid values. Use a positive Telegram ID, yes/no permissions, and a discount from 0 to 100."
+        )
+        return
+    async with SessionLocal() as session:
+        person = await session.scalar(select(Salesperson).where(
+            Salesperson.telegram_user_id == telegram_user_id
+        ))
+        if person is None:
+            await update.effective_message.reply_text("Salesperson account not found; import assignments first.")
+            return
+        person.allow_discount = allow_discount
+        person.max_discount_percent = max_discount if allow_discount else Decimal("0")
+        person.allow_free_quantity = allow_free_quantity
+        await session.commit()
+        name = person.display_name
+    await update.effective_message.reply_text(
+        f"Updated {name}: discount {'allowed up to ' + str(max_discount) + '%' if allow_discount else 'not allowed'}; "
+        f"free quantity {'allowed' if allow_free_quantity else 'not allowed'}."
+    )
+
+
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         f"Your Telegram user ID is: {update.effective_user.id}\n"

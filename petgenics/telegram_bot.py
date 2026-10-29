@@ -14,6 +14,7 @@ from petgenics.admin_telegram import (
     admin_callback,
     admin_menu,
     admin_order,
+    admin_permission,
     admin_report,
     handle_admin_document,
     my_id,
@@ -118,6 +119,7 @@ async def _help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/admin - open the admin menu (approved administrators only)\n"
         "/adminorder ORDER_NUMBER - download files for an older order (admins only)\n"
         "/adminreport YYYY-MM-DD - download a date-wise order Excel (admins only)\n"
+        "/adminpermission ID yes/no MAX_DISCOUNT yes/no - set discount/free quantity permissions\n"
         "You can also send a PDF, JPG or PNG order sheet for scanner-assisted review."
     )
 
@@ -778,6 +780,7 @@ def build_bot(
     application.add_handler(CommandHandler("myid", my_id))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("adminorder", admin_order))
+    application.add_handler(CommandHandler("adminpermission", admin_permission))
     application.add_handler(CommandHandler("adminreport", admin_report))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
     application.add_handler(CommandHandler("start", _start))

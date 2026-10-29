@@ -98,7 +98,7 @@ After the updated version is deployed:
 
 1. Send `/myid` to your bot and note the numeric ID it returns. Do not share it publicly.
 2. In Render → your service → **Environment**, add `ADMIN_TELEGRAM_IDS` with that number as its value, then save and wait for restart.
-3. Send `/admin` to the bot. Use the buttons to import product, party, and assignment Excel files; approve salespeople and orders; and download reports, products, parties, order PDFs, and order Excel files directly in Telegram.
+3. Send `/admin` to the bot. Use the buttons to import product, party, and assignment Excel files; approve salespeople and orders; and download reports, products, parties, order PDFs, and order Excel files directly in Telegram. Use `/adminpermission TELEGRAM_ID yes/no MAX_DISCOUNT yes/no` to set a salesperson's discount and free-quantity permissions.
 4. Download the product, party, or assignment templates from the bot before filling them. Use stable party/product codes and exact brand names. New salespeople remain inactive until you approve them.
 5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`.
 
