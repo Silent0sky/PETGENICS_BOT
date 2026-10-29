@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "Neon": {
+      "type": "http",
+      "url": "https://mcp.neon.tech/mcp?projectId=calm-dust-12330890"
+    }
+  }
+}

@@ -12,3 +12,5 @@ venv/
 PRODUCT EXCEL/
 *.xls
 *.xlsx
+.neon
+node_modules/
