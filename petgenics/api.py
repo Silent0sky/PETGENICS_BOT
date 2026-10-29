@@ -89,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings.bot_token,
                 settings.max_upload_mb * 1024 * 1024,
                 settings.scanner_retention_hours,
+                settings.admin_telegram_ids,
             )
             await bot.initialize()
             await bot.start()

@@ -33,6 +33,7 @@ class Settings:
     max_upload_mb: int
     default_currency: str
     tesseract_cmd: str | None
+    admin_telegram_ids: tuple[int, ...] = ()
 
 
 def get_settings() -> Settings:
@@ -40,6 +41,18 @@ def get_settings() -> Settings:
     if not raw_database_url:
         raise RuntimeError("DATABASE_URL must be set to a persistent PostgreSQL database.")
     database_url = _normalize_database_url(raw_database_url)
+    try:
+        admin_telegram_ids = tuple(
+            dict.fromkeys(
+                int(value.strip())
+                for value in os.getenv("ADMIN_TELEGRAM_IDS", "").split(",")
+                if value.strip()
+            )
+        )
+    except ValueError as exc:
+        raise RuntimeError("ADMIN_TELEGRAM_IDS must be comma-separated numeric Telegram user IDs.") from exc
+    if any(user_id <= 0 for user_id in admin_telegram_ids):
+        raise RuntimeError("ADMIN_TELEGRAM_IDS must contain positive Telegram user IDs.")
     return Settings(
         bot_token=os.getenv("BOT_TOKEN") or None,
         webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
@@ -52,4 +65,5 @@ def get_settings() -> Settings:
         max_upload_mb=max(1, int(os.getenv("MAX_UPLOAD_MB", "15"))),
         default_currency=os.getenv("DEFAULT_CURRENCY", "INR"),
         tesseract_cmd=os.getenv("TESSERACT_CMD") or None,
+        admin_telegram_ids=admin_telegram_ids,
     )

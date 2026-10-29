@@ -10,6 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
+from petgenics.admin_telegram import (
+    admin_callback,
+    admin_menu,
+    admin_order,
+    admin_report,
+    handle_admin_document,
+    my_id,
+)
 from petgenics.db import SessionLocal
 from petgenics.models import BotSession, Order, OrderAudit, Product, Salesperson, ScannerRun
 from petgenics.orders import accessible_brands, accessible_parties, create_draft, submit_draft
@@ -78,6 +86,11 @@ async def _salesperson(session, user_id: int) -> Salesperson | None:
 
 async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    if user.id in context.bot_data.get("admin_telegram_ids", set()):
+        await update.effective_message.reply_text(
+            "Welcome, Petgenics administrator. Use /admin for admin tools or /help for commands."
+        )
+        return
     async with SessionLocal() as session:
         salesperson = await _salesperson(session, user.id)
     if salesperson is None:
@@ -101,6 +114,10 @@ async def _help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/remarks text - add order remarks\n"
         "/submit - submit the order\n"
         "/cancel - cancel the unfinished order\n"
+        "/myid - show your Telegram user ID\n"
+        "/admin - open the admin menu (approved administrators only)\n"
+        "/adminorder ORDER_NUMBER - download files for an older order (admins only)\n"
+        "/adminreport YYYY-MM-DD - download a date-wise order Excel (admins only)\n"
         "You can also send a PDF, JPG or PNG order sheet for scanner-assisted review."
     )
 
@@ -687,6 +704,8 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await handle_admin_document(update, context):
+        return
     user = update.effective_user
     message = update.effective_message
     telegram_file = message.document or message.photo[-1]
@@ -746,10 +765,21 @@ async def _document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-def build_bot(token: str, max_upload_bytes: int, scanner_retention_hours: int) -> Application:
+def build_bot(
+    token: str,
+    max_upload_bytes: int,
+    scanner_retention_hours: int,
+    admin_telegram_ids: tuple[int, ...] = (),
+) -> Application:
     application = Application.builder().token(token).build()
     application.bot_data["max_upload_bytes"] = max_upload_bytes
     application.bot_data["scanner_retention_hours"] = scanner_retention_hours
+    application.bot_data["admin_telegram_ids"] = set(admin_telegram_ids)
+    application.add_handler(CommandHandler("myid", my_id))
+    application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("adminorder", admin_order))
+    application.add_handler(CommandHandler("adminreport", admin_report))
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
     application.add_handler(CommandHandler("start", _start))
     application.add_handler(CommandHandler("help", _help))
     application.add_handler(CommandHandler("remarks", _remarks))

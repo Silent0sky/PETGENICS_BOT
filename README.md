@@ -11,6 +11,7 @@ Python 3.11+ order intake for Petgenics, backed by PostgreSQL. The Telegram bot 
 - Decimal order totals, discount/free-quantity authorization, order review/status decisions and date-wise reports.
 - Digital-PDF text extraction, OCR for scanned PDF pages and images, explicit scanner review, and a configurable PostgreSQL file-retention period.
 - Admin-configured MARG column mapping. No MARG import headers or rules are assumed.
+- Telegram admin menu for order decisions, salesperson approvals, Excel imports/downloads, import error reports, and per-order PDF/internal/MARG exports. Access is restricted to numeric IDs in `ADMIN_TELEGRAM_IDS`.
 - Docker/Render configuration and a PostgreSQL schema baseline.
 
 The five supplied price lists are intentionally **not** pre-imported: their columns differ, some have no brand column, and importing them without an administrator mapping/brand choice would guess product information. Preview each workbook and explicitly map its columns and brand before importing it.
@@ -36,13 +37,17 @@ For a no-cost test setup, use a Render Free Docker web service with a Neon Free 
 5. Set `DATABASE_URL` to the Neon connection string, plus generated `ADMIN_API_KEY` and `HEALTH_CHECK_TOKEN`. Add `WEBHOOK_SECRET` using Render's **Generate** option. Initially leave `BOT_TOKEN` unset so the app can deploy before its public URL is known.
 6. Deploy and wait for the service to become Live. Copy the exact Render HTTPS service URL; confirm `/healthz` returns `{"status":"ok"}`.
 7. Set `WEBHOOK_URL` to that exact HTTPS URL and add `BOT_TOKEN` from BotFather. Use a newly generated token; revoke any token previously shared in chat. Save the settings and wait for Render to redeploy.
-8. Open `/admin` to import parties/products, then configure an approved salesperson with authorized party/brand assignments before testing `/order` in Telegram.
+8. After deploying the Telegram admin update, send `/myid`, add that numeric ID to Render's `ADMIN_TELEGRAM_IDS`, wait for restart, then use `/admin` to import Excel files, approve salespeople/orders, and receive order exports in Telegram.
 
 The app normalizes Neon’s `postgresql://` URL for SQLAlchemy/asyncpg and converts `sslmode=require` into the asyncpg `ssl=require` option.
 
 Render Free web services sleep after 15 minutes without traffic and can take about a minute to wake. Neon Free compute also suspends after inactivity. Free plans have usage and reliability limits; check provider dashboards regularly. For production, use paid hosting/database plans and a verified backup/recovery process. Do not expose secrets in URLs, source files, screenshots, or chat messages.
 
 The Telegram secret is read from the environment, used as the webhook path component and checked again against Telegram's webhook secret header. Do not paste bot tokens into source files, commits, tickets, or logs. Rotate a token if it is accidentally disclosed.
+
+### Telegram admin menu
+
+Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` to review and decide orders, approve/deactivate salespeople, import product/party/assignment workbooks, download full lists and date-wise reports, and receive per-order PDF/internal Excel exports in Telegram. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. Use `/myid` to find your Telegram user ID. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
 
 ### PostgreSQL backups and recovery
 

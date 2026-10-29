@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_mock_engine
 
 from petgenics.api import create_app
-from petgenics.config import Settings, _normalize_database_url
+from petgenics.config import Settings, _normalize_database_url, get_settings
 from petgenics.excel_io import preview_workbook, read_mapped_rows, workbook_bytes
 from petgenics.imports import duplicate_code_rows
 from petgenics.marg import order_rows, validate_mapping
@@ -35,6 +35,13 @@ def test_neon_database_url_is_normalized_for_asyncpg_ssl():
 def test_render_postgres_url_is_converted_without_changing_database():
     url = _normalize_database_url("postgres://user:secret@db.internal:5432/petgenics")
     assert url == "postgresql+asyncpg://user:secret@db.internal:5432/petgenics"
+
+
+def test_admin_telegram_ids_are_parsed_and_deduplicated(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/petgenics")
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "12345,67890,12345")
+
+    assert get_settings().admin_telegram_ids == (12345, 67890)
 
 
 def test_negative_quantity_and_out_of_range_discount_are_rejected():

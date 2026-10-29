@@ -50,6 +50,7 @@ On the service-creation form, enter these in **Environment Variables**. If the s
 |---|---|
 | `DATABASE_URL` | Paste the private Neon connection string. The app converts Neon’s PostgreSQL URL and SSL options for its async driver. |
 | `ADMIN_API_KEY` | Click **Generate** in Render; keep it private. This unlocks admin operations. |
+| `ADMIN_TELEGRAM_IDS` | Optional at first. After the new Telegram admin feature is deployed, send `/myid` to the bot and put that numeric ID here to enable `/admin`. |
 | `HEALTH_CHECK_TOKEN` | Click **Generate** in Render; keep it private. |
 | `WEBHOOK_SECRET` | Click **Generate** in Render; keep it private. |
 
@@ -91,15 +92,17 @@ Use the protected admin page at `/admin`:
 
 Blank cells do not clear existing values. Re-importing the same code updates that record instead of making a duplicate.
 
-## 8. Add and approve a test salesperson
+## 8. Use the Telegram admin menu
 
-1. Open `https://YOUR-SERVICE-URL/docs`.
-2. Click **Authorize** and enter `ADMIN_API_KEY` as the `X-Admin-Key` value.
-3. Use `POST /admin/imports/assignments` to import salesperson Telegram IDs, names, authorized party codes, and brand assignments. Follow the endpoint's form fields and mapping in `/docs`.
-4. New salesperson accounts are inactive until approved. Use `PATCH /admin/salespersons/{telegram_user_id}/approval` with `{"active":true}` to approve an account.
-5. Only assign parties and brands that exist in the imported active party/product lists.
+After the updated version is deployed:
 
-Keep the admin key private while using `/docs`; log out/close the page when finished.
+1. Send `/myid` to your bot and note the numeric ID it returns. Do not share it publicly.
+2. In Render → your service → **Environment**, add `ADMIN_TELEGRAM_IDS` with that number as its value, then save and wait for restart.
+3. Send `/admin` to the bot. Use the buttons to import product, party, and assignment Excel files; approve salespeople and orders; and download reports, products, parties, order PDFs, and order Excel files directly in Telegram.
+4. Download the product, party, or assignment templates from the bot before filling them. Use stable party/product codes and exact brand names. New salespeople remain inactive until you approve them.
+5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`.
+
+The web dashboard and protected APIs remain available as a fallback. MARG export requires configuration from the actual MARG template; do not guess its columns.
 
 ## 9. Test the Telegram bot
 
