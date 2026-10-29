@@ -1,0 +1,102 @@
+# Petgenics Telegram Order Bot
+
+Python 3.11+ order intake for Petgenics, backed by PostgreSQL. The Telegram bot is optional during development: without `BOT_TOKEN`, the API starts without a Telegram webhook. No token is included in this repository.
+
+## What is included
+
+- FastAPI service, Telegram webhook and PostgreSQL/SQLAlchemy models.
+- Persistent draft orders, order audit events, approved salesperson accounts, and per-person party/brand assignments.
+- Admin-protected bulk product and party list updates from the dashboard, Excel preview and column mapping, generated templates, full exports, import logs and downloadable row-error workbooks.
+- Column mapping for `.xlsx` and `.xls`; auto-detected header row can be overridden. Numeric product codes formatted with leading zeroes are preserved, duplicate codes in an upload are reported, blank cells do not erase existing product data, and unmapped nonblank source columns are retained.
+- Decimal order totals, discount/free-quantity authorization, order review/status decisions and date-wise reports.
+- Digital-PDF text extraction, OCR for scanned PDF pages and images, explicit scanner review, and a configurable PostgreSQL file-retention period.
+- Admin-configured MARG column mapping. No MARG import headers or rules are assumed.
+- Docker/Render configuration and a PostgreSQL schema baseline.
+
+The five supplied price lists are intentionally **not** pre-imported: their columns differ, some have no brand column, and importing them without an administrator mapping/brand choice would guess product information. Preview each workbook and explicitly map its columns and brand before importing it.
+
+## Run locally
+
+1. Use Python 3.11 or later and a PostgreSQL database.
+2. Install dependencies: `python -m pip install -r requirements.txt`.
+3. Copy `.env.example` to `.env` and set `DATABASE_URL`, `ADMIN_API_KEY`, and `HEALTH_CHECK_TOKEN`. Never commit `.env`.
+4. Start the API: `uvicorn main:app --reload`.
+5. Open `/docs`. Admin operations require the `X-Admin-Key` header. The bot is not initialized unless `BOT_TOKEN` is configured.
+
+The container applies the Alembic migration before starting the API. For local setup, run `alembic upgrade head` once after configuring `DATABASE_URL`. `migrations/001_initial.sql` is also provided as a plain-SQL initial schema for manual provisioning. Do not apply the initial baseline over an existing populated database. Future schema changes should be added as new Alembic revisions.
+
+## Render deployment
+
+1. Push this project to a private GitHub repository. Do not add credentials, `.env`, product/customer exports, or database backups.
+2. In Render, choose **New → Blueprint** and select the repository. `render.yaml` provisions a Docker web service and persistent PostgreSQL database.
+3. Set `BOT_TOKEN` in the Render dashboard after creating the bot with BotFather. Add the current service's public HTTPS URL as `WEBHOOK_URL` if the blueprint's default URL differs.
+4. Deploy. The service runs database schema initialization, configures the Telegram webhook, and serves `/healthz` for Render liveness checks. `/health` is protected by `X-Health-Token`.
+5. Set the generated admin key and health token in the Render environment dashboard if you want to replace the blueprint-generated values. Never expose them in URLs or client-side code.
+
+The Telegram secret is read from the environment, used as the webhook path component and checked again against Telegram's webhook secret header. Do not paste bot tokens into source files, commits, tickets, or logs. Rotate a token if it is accidentally disclosed.
+
+### PostgreSQL backups and recovery
+
+Use Render's database backup/PITR facilities for routine recovery where available. For an additional portable backup, run from a trusted machine with PostgreSQL client tools and a protected database URL:
+
+```powershell
+$env:PGPASSWORD = "your-database-password"
+pg_dump "$env:DATABASE_URL" --format=custom --file="petgenics-backup.dump"
+pg_restore --list "petgenics-backup.dump"
+```
+
+Restore into a newly provisioned database after reviewing the target:
+
+```powershell
+pg_restore --clean --if-exists --dbname="$env:DATABASE_URL" "petgenics-backup.dump"
+```
+
+Protect and encrypt backup files, restrict access, and delete them under your retention policy. Product masters, orders, audit history, scanner review metadata, and scanner documents within their configured retention period live in PostgreSQL, not solely on Render's ephemeral filesystem.
+
+## Admin API workflows
+
+The `/admin` page is a small dashboard for orders, product imports, templates and MARG mappings. Its data-changing/API requests require `X-Admin-Key`; the key is kept in the current browser tab's session storage. Other admin routes can be used from `/docs`, and still enforce authorization.
+
+### Product import
+
+1. `POST /admin/imports/preview` with an Excel file and worksheet index. The response includes detected headers, sample rows and the detected 1-based header row.
+2. Map the exact returned column names to `product_code`, `name`, `brand`, `family`, `mrp`, `pack_size`, `selling_rate`, and/or `stock`.
+3. `POST /admin/imports/products` with the workbook, JSON `mapping` form value, optional `brand_override`, and optional `header_row`.
+4. Review the created/updated/skipped/failed counts and row errors. Download a saved error report at `/admin/imports/{batch_id}/errors.xlsx`.
+
+The stable product code is required. New products also need a name and a mapped brand or explicit brand override; existing products can be updated from a stock-only file by mapping just product code and stock. Blank cells on re-import leave existing values untouched. Existing product codes update rather than create duplicate products.
+
+`GET /admin/products/template.xlsx` returns a blank workbook template; `GET /admin/products.xlsx` exports the master. Product imports can also update stock through a mapped `stock` column.
+
+### Parties, salespeople and permissions
+
+- In the admin dashboard, preview a party or product workbook, choose its worksheet/header row, map detected columns, and import/update the list in bulk. Review per-row created/updated/skipped/failed results and download an error workbook when rows fail. The equivalent protected APIs are `POST /admin/imports/preview`, `POST /admin/imports/parties`, and `POST /admin/imports/products`.
+- Import party masters by mapping stable `party_code` and `name` columns. Product imports use `product_code` as the stable key. Re-uploading updates matching records rather than duplicating them; unmapped/blank values do not clear existing values. Preview detects headers and supports title rows; worksheet index is zero-based and a header row can be overridden.
+- Use the party/product template buttons to download templates and the export buttons to retrieve the current full database lists before editing. Imports are admin-only and require the `X-Admin-Key`.
+- Generated internal party codes are not ERP/MARG party codes; replace or map them to the actual ERP codes before relying on MARG exports.
+- Approve/deactivate a Telegram account and set its discount/free-product permissions through `PUT /admin/salespersons`.
+- Import party/brand assignments through `POST /admin/imports/assignments`. New Telegram IDs are created inactive and require explicit approval; brand assignments must match active products and party assignments must match active parties.
+- List configured people and assignments with `GET /admin/salespersons`.
+- Approve/deactivate an existing account without changing its assignments using `PATCH /admin/salespersons/{telegram_user_id}/approval`.
+
+Salespeople can only select assigned parties and brands. Account approval is by numeric Telegram user ID; display names are not used as identity.
+
+### Orders and exports
+
+Telegram commands: `/order`, `/neworder`, `/cart`, `/switchbrand`, `/back`, `/submit`, `/cancel`, and `/help`. A draft and the conversation state persist in PostgreSQL across service restarts. Cart items can be edited/removed; switching brands retains the cart. Submission is locked to the saved draft and cannot create a second order from a repeated submit.
+
+Use `GET /admin/orders` to search/filter, then `POST /admin/orders/{id}/decision` to approve or reject submitted orders. Daily reports are available at `/admin/reports/daily.xlsx?report_date=YYYY-MM-DD`; the orders endpoint accepts date ranges. Each order has an internal Excel report and PDF summary.
+
+Before MARG export, configure `/admin/marg/mapping` from the actual MARG template. The mapping keys are the real external Excel headers, values are supported internal fields, and `required_fields` comes from the actual import specification. Single-order export is `/admin/orders/{id}/marg.xlsx`. Combined export is available only when explicitly enabled in that mapping and the selected orders are approved. No MARG headers are hard-coded.
+
+## PDF/image order scanner
+
+The Docker image installs Tesseract OCR. Digital PDFs are text-extracted first; image-only PDF pages and JPG/PNG uploads use Tesseract. Local deployments need the Tesseract executable installed and on `PATH`, or `TESSERACT_CMD` set.
+
+The scanner matches exact product codes or unique exact product names and only extracts quantities when a `qty`/`quantity` label is visible. It does not infer a rate, free quantity, discount, ambiguous product, or unlabeled quantity. The sender must explicitly confirm; confirmed certain lines become an editable draft and uncertain/unmatched lines must be entered manually. Uploaded document bytes and OCR text are stored privately in PostgreSQL and cleared after `SCANNER_RETENTION_HOURS` (default 24); choosing **Discard review** clears them immediately. Scanner review APIs are admin-protected.
+
+OCR results require human verification. Handwriting, low-quality images, unusual layouts, and non-English text can require additional OCR configuration; the current scanner is designed to warn or leave a line unmatched rather than silently submit a guess.
+
+## Tests
+
+Run `python -m pytest -q`. Tests cover decimal calculations, Excel header/code handling, duplicate rows, MARG mapping validation, scanner uncertainty, and workbook generation. A live PostgreSQL instance and Telegram token are not needed for these unit tests; production database/webhook integration should be smoke-tested in a non-production Render environment before rollout.

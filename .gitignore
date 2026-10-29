@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.py[cod]
+*.dump
+*.backup
+*.sqlite*
+PRODUCT EXCEL/
+*.xls
+*.xlsx

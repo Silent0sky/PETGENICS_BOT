@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Petgenics Admin</title>
+  <style>
+    body{font:15px system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1f2937}
+    h1,h2{color:#244062}section{border:1px solid #d5dce5;border-radius:8px;padding:1rem;margin:1rem 0}
+    label{display:block;margin:.7rem 0 .25rem}input,textarea,button,select{font:inherit;padding:.5rem}
+    input[type=text],textarea{box-sizing:border-box;width:100%}textarea{min-height:100px}
+    button{cursor:pointer;margin:.25rem;background:#244062;color:white;border:0;border-radius:4px}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:.75rem}
+    .row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}.muted{color:#526171}
+    .mapping-row{display:grid;grid-template-columns:minmax(150px,1fr) minmax(180px,1fr);gap:.5rem;align-items:center;margin:.4rem 0}
+    .mapping-row select{width:100%}.sample{font-size:.9rem;color:#526171;overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <h1>Petgenics Admin</h1>
+  <p class="muted">Admin actions are sent to the protected API. The key stays in this browser tab's session storage.</p>
+  <section>
+    <label for="key">Admin API key</label>
+    <input id="key" type="password" autocomplete="off">
+    <button id="saveKey">Use key for this tab</button>
+    <a href="/docs">API reference</a>
+    <pre id="status">Enter your key, then load orders or preview an import.</pre>
+  </section>
+  <section>
+    <h2>Orders</h2>
+    <div class="row"><input id="orderSearch" type="text" placeholder="Order number, party, or brand">
+      <button id="loadOrders">Load orders</button></div>
+    <div id="orders"></div>
+  </section>
+  <section>
+    <h2>Bulk product list update</h2>
+    <p>Upload an Excel workbook, preview the detected columns, and map each source column. Existing product codes are updated; blank cells do not erase stored values. Duplicate codes in a workbook are reported and skipped.</p>
+    <label for="productFile">Excel workbook</label><input id="productFile" type="file" accept=".xlsx,.xls">
+    <label for="productSheet">Worksheet index (zero-based)</label><input id="productSheet" type="number" value="0" min="0">
+    <label for="productHeaderRow">Header row (1-based, optional)</label><input id="productHeaderRow" type="number" min="1" placeholder="Auto-detect">
+    <label for="brandOverride">Explicit brand override (only when verified and absent from the file)</label><input id="brandOverride" type="text">
+    <div class="row"><button id="previewProducts">Preview and map columns</button><button id="importProducts" disabled>Import/update products</button>
+      <button data-download="/admin/products/template.xlsx">Product template</button>
+      <button data-download="/admin/products.xlsx">Export products</button></div>
+    <div id="productMapping"></div>
+    <pre id="productPreview">Select a workbook and preview it before importing.</pre>
+    <pre id="productResult"></pre>
+  </section>
+  <section>
+    <h2>Bulk party list update</h2>
+    <p>Party code is the stable key. Existing codes update their party name when mapped; blank names do not erase stored names. Keep ERP/MARG party codes where available.</p>
+    <label for="partyFile">Excel workbook</label><input id="partyFile" type="file" accept=".xlsx,.xls">
+    <label for="partySheet">Worksheet index (zero-based)</label><input id="partySheet" type="number" value="0" min="0">
+    <label for="partyHeaderRow">Header row (1-based, optional)</label><input id="partyHeaderRow" type="number" min="1" placeholder="Auto-detect">
+    <div class="row"><button id="previewParties">Preview and map columns</button><button id="importParties" disabled>Import/update parties</button>
+      <button data-download="/admin/parties/template.xlsx">Party template</button>
+      <button data-download="/admin/parties.xlsx">Export parties</button></div>
+    <div id="partyMapping"></div>
+    <pre id="partyPreview">Select a workbook and preview it before importing.</pre>
+    <pre id="partyResult"></pre>
+  </section>
+  <section>
+    <h2>MARG mapping</h2>
+    <p>Enter actual template headers and required internal fields. No MARG format is assumed.</p>
+    <textarea id="margMapping" spellcheck="false"
+      placeholder='{"columns":{"Actual party column":"party_code","Actual order column":"order_number","Actual date column":"order_date","Actual product column":"product_code","Actual quantity column":"quantity"},"required_fields":["party_code","order_number","order_date","product_code","quantity"],"combined_allowed":false}'></textarea>
+    <button id="saveMarg">Save mapping</button>
+    <pre id="margResult"></pre>
+  </section>
+  <section>
+    <h2>Other admin tools</h2>
+    <p>Use the API reference to import salesperson assignments, approve/deactivate salespeople, configure discount/free-quantity permissions, view scanner logs, and download reports.</p>
+  </section>
+<script>
+  const keyInput=document.getElementById("key");
+  keyInput.value=sessionStorage.getItem("petgenicsAdminKey")||"";
+  const statusBox=document.getElementById("status");
+  const importStates={products:null,parties:null};
+  const fieldOptions={
+    products:["product_code","name","brand","family","mrp","pack_size","selling_rate","stock"],
+    parties:["party_code","name"]
+  };
+  const fieldLabels={product_code:"Product code",party_code:"Party code",name:"Name",brand:"Brand/company",family:"Product family",mrp:"MRP",pack_size:"Pack size",selling_rate:"Selling rate",stock:"Stock"};
+  const aliases={
+    product_code:["product code","products code","code","sku","item code","mat number","material code"],
+    party_code:["party code","partycode","customer code","customer id","ledger code","account code"],
+    name:["name","product name","party name","customer name","description","product description","ledger name"],
+    brand:["brand","company","brand name"],
+    family:["family","product family","category","sub category"],
+    mrp:["mrp","mrp rate"],
+    pack_size:["pack","pack size","size","packing"],
+    selling_rate:["rate","selling rate","sale rate"],
+    stock:["stock","qty","quantity","closing stock"]
+  };
+  function auth(){const key=keyInput.value.trim();if(!key)throw new Error("Enter the admin API key.");return {"X-Admin-Key":key};}
+  async function api(url,options={}){const headers={...auth(),...(options.headers||{})};const response=await fetch(url,{...options,headers});const body=await response.text();if(!response.ok)throw new Error(`${response.status}: ${body}`);return body?JSON.parse(body):{};}
+  document.getElementById("saveKey").onclick=()=>{sessionStorage.setItem("petgenicsAdminKey",keyInput.value.trim());statusBox.textContent="Key saved for this tab.";};
+  document.getElementById("loadOrders").onclick=async()=>{try{const search=document.getElementById("orderSearch").value;const data=await api("/admin/orders?limit=100"+(search?"&search="+encodeURIComponent(search):""));const host=document.getElementById("orders");host.replaceChildren();for(const order of data){const box=document.createElement("section");const title=document.createElement("pre");title.textContent=JSON.stringify(order,null,2);box.append(title);if(order.status==="Submitted"){for(const status of ["Approved","Rejected"]){const button=document.createElement("button");button.textContent=status;button.onclick=async()=>{try{await api(`/admin/orders/${order.id}/decision`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});document.getElementById("loadOrders").click();}catch(e){statusBox.textContent=e.message;}};box.append(button);}}for(const [label,path] of [["PDF summary",`/admin/orders/${order.id}/summary.pdf`],["Internal Excel",`/admin/orders/${order.id}/report.xlsx`],["Audit history",`/admin/orders/${order.id}/audit`]]){const button=document.createElement("button");button.textContent=label;button.onclick=async()=>{try{if(path.endsWith("/audit")){statusBox.textContent=JSON.stringify(await api(path),null,2);return;}await download(path);}catch(e){statusBox.textContent=e.message;}};box.append(button);}if(order.status==="Approved"||order.status==="Exported"){const button=document.createElement("button");button.textContent="MARG Excel";button.onclick=async()=>{try{await download(`/admin/orders/${order.id}/marg.xlsx`);document.getElementById("loadOrders").click();}catch(e){statusBox.textContent=e.message;}};box.append(button);}host.append(box);}statusBox.textContent=`Loaded ${data.length} order(s).`;}catch(e){statusBox.textContent=e.message;}};
+  async function download(path){const response=await fetch(path,{headers:auth()});if(!response.ok)throw new Error(`${response.status}: ${await response.text()}`);const blob=await response.blob();const link=document.createElement("a");link.href=URL.createObjectURL(blob);link.download=path.split("/").pop();link.click();URL.revokeObjectURL(link.href);}
+  document.querySelectorAll("[data-download]").forEach(button=>button.onclick=async()=>{try{await download(button.dataset.download);}catch(e){statusBox.textContent=e.message;}});
+  function normalized(value){return String(value).trim().toLowerCase().replace(/[_-]+/g," ").replace(/\s+/g," ");}
+  function guessField(header,kind){
+    const value=normalized(header);
+    for(const field of fieldOptions[kind]){
+      if((aliases[field]||[field]).some(alias=>normalized(alias)===value))return field;
+    }
+    return "";
+  }
+  function resetImport(kind,message){
+    importStates[kind]=null;
+    const mapping=document.getElementById(kind==="products"?"productMapping":"partyMapping");
+    const result=document.getElementById(kind==="products"?"productResult":"partyResult");
+    mapping.replaceChildren();
+    if(result.nextElementSibling&&result.nextElementSibling.classList.contains("error-report-download"))result.nextElementSibling.remove();
+    document.getElementById(kind==="products"?"productPreview":"partyPreview").textContent=message;
+    result.textContent="";
+    document.getElementById(kind==="products"?"importProducts":"importParties").disabled=true;
+  }
+  function formFor(kind){
+    const prefix=kind==="products"?"product":"party";
+    const file=document.getElementById(prefix+"File").files[0];
+    if(!file)throw new Error("Choose an Excel workbook.");
+    const form=new FormData();
+    form.append("file",file);
+    form.append("sheet",document.getElementById(prefix+"Sheet").value||"0");
+    const header=document.getElementById(prefix+"HeaderRow").value;
+    if(header)form.append("header_row",header);
+    return form;
+  }
+  function currentMapping(kind){
+    const state=importStates[kind];
+    if(!state)throw new Error("Preview this workbook before importing.");
+    const mapping={};
+    document.querySelectorAll(`#${kind==="products"?"productMapping":"partyMapping"} select`).forEach(select=>{
+      if(select.value)mapping[select.dataset.header]=select.value;
+    });
+    const required=kind==="products"?["product_code"]:["party_code","name"];
+    const missing=required.filter(field=>!Object.values(mapping).includes(field));
+    if(missing.length)throw new Error(`Map a column to ${missing.map(field=>fieldLabels[field]).join(" and ")}.`);
+    return mapping;
+  }
+  function renderMapping(kind,preview){
+    const target=document.getElementById(kind==="products"?"productMapping":"partyMapping");
+    target.replaceChildren();
+    const selectors=[];
+    const title=document.createElement("p");
+    title.textContent="Map each Excel column to a field. Unmapped columns are ignored.";
+    target.append(title);
+    for(const header of preview.columns){
+      const row=document.createElement("div");
+      row.className="mapping-row";
+      const label=document.createElement("label");
+      label.textContent=header;
+      const select=document.createElement("select");
+      select.dataset.header=header;
+      selectors.push(select);
+      const none=document.createElement("option");
+      none.value="";
+      none.textContent="Do not import";
+      select.append(none);
+      for(const field of fieldOptions[kind]){
+        const option=document.createElement("option");
+        option.value=field;
+        option.textContent=fieldLabels[field]||field;
+        if(guessField(header,kind)===field)option.selected=true;
+        select.append(option);
+      }
+      label.htmlFor=`${kind}-${preview.columns.indexOf(header)}`;
+      select.id=label.htmlFor;
+      row.append(label,select);
+      target.append(row);
+    }
+    const updateOptions=()=>{
+      const selected=selectors.map(select=>select.value).filter(Boolean);
+      for(const select of selectors){
+        for(const option of select.options){
+          option.disabled=Boolean(option.value&&option.value!==select.value&&selected.includes(option.value));
+        }
+      }
+    };
+    selectors.forEach(select=>select.addEventListener("change",updateOptions));
+    updateOptions();
+  }
+  async function previewImport(kind){
+    const previewBox=document.getElementById(kind==="products"?"productPreview":"partyPreview");
+    const resultBox=document.getElementById(kind==="products"?"productResult":"partyResult");
+    try{
+      resetImport(kind,"Loading preview...");
+      const preview=await api("/admin/imports/preview",{method:"POST",body:formFor(kind)});
+      importStates[kind]=preview;
+      renderMapping(kind,preview);
+      previewBox.textContent=`Detected ${preview.row_count} data row(s); header row ${preview.header_row}.\n\nColumns: ${preview.columns.join(" | ")}\n\nSample rows:\n${JSON.stringify(preview.preview,null,2)}`;
+      document.getElementById(kind==="products"?"importProducts":"importParties").disabled=false;
+      resultBox.textContent="";
+    }catch(error){resetImport(kind,error.message);}
+  }
+  async function importWorkbook(kind){
+    const resultBox=document.getElementById(kind==="products"?"productResult":"partyResult");
+    try{
+      const file=document.getElementById(kind==="products"?"productFile":"partyFile").files[0];
+      if(!file||!importStates[kind])throw new Error("Choose and preview a workbook before importing.");
+      const mapping=currentMapping(kind);
+      if(!window.confirm(`Import ${importStates[kind].row_count} row(s) from ${file.name}? Existing matching records may be updated.`))return;
+      const form=formFor(kind);
+      form.append("mapping",JSON.stringify(mapping));
+      const url=kind==="products"?"/admin/imports/products":"/admin/imports/parties";
+      if(kind==="products"){
+        const brand=document.getElementById("brandOverride").value.trim();
+        if(brand)form.append("brand_override",brand);
+      }
+      const result=await api(url,{method:"POST",body:form});
+      if(resultBox.nextElementSibling&&resultBox.nextElementSibling.classList.contains("error-report-download"))resultBox.nextElementSibling.remove();
+      const summary={batch_id:result.batch_id,created:result.created,updated:result.updated,skipped:result.skipped,failed:result.failed,successful_rows:result.successful_rows,errors:result.errors};
+      resultBox.textContent=JSON.stringify(summary,null,2);
+      document.getElementById(kind==="products"?"importProducts":"importParties").disabled=true;
+      if(result.errors&&result.errors.length){
+        const button=document.createElement("button");
+        button.className="error-report-download";
+        button.textContent="Download row error report";
+        button.onclick=async()=>{try{await download(`/admin/imports/${result.batch_id}/errors.xlsx`);}catch(error){resultBox.textContent+=`\n${error.message}`;}};
+        resultBox.after(button);
+      }
+    }catch(error){resultBox.textContent=error.message;}
+  }
+  document.getElementById("previewProducts").onclick=()=>previewImport("products");
+  document.getElementById("previewParties").onclick=()=>previewImport("parties");
+  document.getElementById("importProducts").onclick=()=>importWorkbook("products");
+  document.getElementById("importParties").onclick=()=>importWorkbook("parties");
+  for(const [kind,ids] of [["products",["productFile","productSheet","productHeaderRow"]],["parties",["partyFile","partySheet","partyHeaderRow"]]]){
+    for(const id of ids){
+      document.getElementById(id).addEventListener("change",()=>resetImport(kind,"Workbook settings changed. Preview again before importing."));
+    }
+  }
+  document.getElementById("saveMarg").onclick=async()=>{try{const body=JSON.parse(document.getElementById("margMapping").value);const result=await api("/admin/marg/mapping",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});document.getElementById("margResult").textContent=JSON.stringify(result,null,2);}catch(e){document.getElementById("margResult").textContent=e.message;}};
+</script>
+</body>
+</html>
