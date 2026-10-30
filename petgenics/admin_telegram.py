@@ -2,16 +2,40 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import textwrap
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+from petgenics.admin_catalog import handle_catalog_callback, handle_catalog_text
+from petgenics.admin_orders import (
+    handle_order_navigation,
+    notify_admins_new_order as _notify_admins_new_order,
+    show_order_page,
+)
+from petgenics.admin_people import (
+    handle_people_callback,
+    handle_people_text,
+)
+from petgenics.admin_reports import (
+    handle_marg_callback,
+    handle_marg_text,
+    handle_report_text,
+    route_report_callback,
+    show_dashboard,
+    show_report_menu,
+    show_scanner_runs,
+    show_status,
+)
+from petgenics.admin_ui import inline_keyboard
+from petgenics.bot_menu import reply_keyboard
 from petgenics.db import SessionLocal
 from petgenics.excel_io import (
     preview_workbook,
@@ -33,6 +57,7 @@ from petgenics.models import (
     SalespersonParty,
 )
 
+logger = logging.getLogger(__name__)
 
 def _admin_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
     return context.bot_data.get("admin_telegram_ids", set())
@@ -49,12 +74,16 @@ def _keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     ])
 
 
-def _menu() -> InlineKeyboardMarkup:
-    return _keyboard([
-        [("Review orders", "admin:orders"), ("Salesperson approvals", "admin:people")],
-        [("Excel/PDF downloads", "admin:downloads"), ("Import products", "admin:import:products")],
-        [("Import parties", "admin:import:parties"), ("Import assignments", "admin:import:assignments")],
-        [("Recent import results", "admin:imports")],
+def _menu(pending_orders: int = 0, pending_people: int = 0) -> InlineKeyboardMarkup:
+    return inline_keyboard([
+        [("Dashboard", "admin:dashboard"),
+         (f"Orders ({pending_orders} pending)", "admin:orders")],
+        [(f"Salespersons ({pending_people} to approve)", "admin:people"),
+         ("Products", "admin:products")],
+        [("Parties", "admin:parties"), ("Brands", "admin:brands")],
+        [("Bulk import", "admin:bulk"), ("Downloads & reports", "admin:reports")],
+        [("MARG settings", "admin:marg"), ("Broadcast", "admin:people:broadcast")],
+        [("Scanner uploads", "admin:scanner"), ("Status & help", "admin:status")],
     ])
 
 
@@ -63,7 +92,11 @@ async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Administrator access is required.")
         return
     if not context.args:
-        report_date = date.today()
+        from petgenics.admin_ui import report_timezone
+
+        report_date = datetime.now(timezone.utc).astimezone(
+            report_timezone(context.bot_data.get("report_utc_offset_minutes", 330))
+        ).date()
     elif len(context.args) == 1:
         try:
             report_date = date.fromisoformat(context.args[0])
@@ -73,7 +106,14 @@ async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.effective_message.reply_text("Use /adminreport or /adminreport YYYY-MM-DD.")
         return
-    await _send_daily_report(_MessageQuery(update.effective_message), report_date)
+    from petgenics.admin_reports import send_orders_export
+
+    await send_orders_export(
+        _MessageQuery(update.effective_message, update.effective_user),
+        report_date,
+        report_date,
+        context.bot_data.get("report_utc_offset_minutes", 330),
+    )
 
 
 async def admin_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -165,7 +205,23 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             message = "This Telegram account is not configured as an administrator."
         await update.effective_message.reply_text(message)
         return
-    await update.effective_message.reply_text("Petgenics admin menu:", reply_markup=_menu())
+    from sqlalchemy import func
+
+    async with SessionLocal() as session:
+        pending_orders = await session.scalar(
+            select(func.count()).select_from(Order).where(Order.status == "Submitted")
+        ) or 0
+        pending_people = await session.scalar(
+            select(func.count()).select_from(Salesperson).where(Salesperson.active.is_(False))
+        ) or 0
+    await update.effective_message.reply_text(
+        "Petgenics admin panel:",
+        reply_markup=reply_keyboard(True),
+    )
+    await update.effective_message.reply_text(
+        "Choose an admin section:",
+        reply_markup=_menu(pending_orders, pending_people),
+    )
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -177,26 +233,65 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     data = query.data or ""
 
+    if await handle_order_navigation(update, context, data):
+        return
+    if await handle_people_callback(update, context, data):
+        return
+    if await handle_catalog_callback(update, context, data):
+        return
+    if await route_report_callback(update, context, data):
+        return
+    if await handle_marg_callback(query, context, data):
+        return
     if data == "admin:menu":
-        await query.edit_message_text("Petgenics admin menu:", reply_markup=_menu())
+        await query.edit_message_text("Petgenics admin panel:", reply_markup=_menu())
         return
-    if data == "admin:orders":
-        await _show_orders(query)
+    if data == "admin:dashboard":
+        await show_dashboard(query, context.bot_data.get("report_utc_offset_minutes", 330))
         return
-    if data == "admin:people":
-        await _show_salespersons(query)
-        return
-    if data == "admin:downloads":
+    if data == "admin:bulk":
         await query.edit_message_text(
-            "Choose a download:",
-            reply_markup=_keyboard([
-                [("Today's orders Excel", "admin:daily")],
-                [("Full products Excel", "admin:products"), ("Full parties Excel", "admin:parties")],
-                [("Product template", "admin:template:products"), ("Party template", "admin:template:parties")],
-                [("Assignments template", "admin:template:assignments")],
-                [("Back to admin menu", "admin:menu")],
+            "Bulk import:",
+            reply_markup=inline_keyboard([
+                [("Products", "admin:import:products"), ("Parties", "admin:import:parties")],
+                [("Assignments", "admin:import:assignments")],
+                [("Product template", "admin:template:products"),
+                 ("Party template", "admin:template:parties")],
+                [("Assignments template", "admin:template:assignments"),
+                 ("Recent import results", "admin:imports")],
+                [("Admin menu", "admin:menu")],
             ]),
         )
+        return
+    if data == "admin:downloads":
+        await show_report_menu(query)
+        return
+    if data == "admin:orders:bulk:confirm":
+        context.user_data["admin_bulk_approve_confirm"] = True
+        await query.edit_message_text(
+            "Approve up to 100 currently pending orders?",
+            reply_markup=inline_keyboard([[
+                ("Confirm", "admin:orders:bulk:apply"),
+                ("Cancel", "admin:orders"),
+            ]]),
+        )
+        return
+    if data == "admin:orders:bulk:apply":
+        if not context.user_data.pop("admin_bulk_approve_confirm", False):
+            await query.edit_message_text("That confirmation expired.")
+            return
+        await _bulk_approve_orders(query, context)
+        return
+    if data.startswith("admin:scanner") or data == "admin:scanner":
+        if data == "admin:scanner":
+            await show_scanner_runs(query)
+        else:
+            from petgenics.admin_reports import scanner_action
+
+            await scanner_action(query, context, data)
+        return
+    if data == "admin:status":
+        await show_status(query, context)
         return
     if data.startswith("admin:import:"):
         kind = data.rsplit(":", 1)[1]
@@ -236,7 +331,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _send_file(query, content, "petgenics-parties.xlsx", f"{len(parties)} party/parties.")
         return
     if data == "admin:daily":
-        await _send_daily_report(query, date.today())
+        from petgenics.admin_ui import report_timezone
+        from petgenics.admin_reports import send_orders_export
+
+        report_day = datetime.now(timezone.utc).astimezone(
+            report_timezone(context.bot_data.get("report_utc_offset_minutes", 330))
+        ).date()
+        await send_orders_export(
+            query, report_day, report_day,
+            context.bot_data.get("report_utc_offset_minutes", 330),
+        )
         return
     if data == "admin:imports":
         await _show_imports(query)
@@ -245,10 +349,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _send_import_errors(query, data)
         return
     if data.startswith("admin:person:"):
-        await _change_salesperson(query, data)
+        await _change_salesperson(query, data, context)
         return
     if data.startswith("admin:order:"):
-        await _handle_order_action(query, data)
+        await _handle_order_action(query, data, context)
         return
     await query.edit_message_text("That admin action is not available.")
 
@@ -316,7 +420,7 @@ async def _show_salespersons(query) -> None:
     await query.edit_message_text("\n".join(labels), reply_markup=_keyboard(rows))
 
 
-async def _change_salesperson(query, data: str) -> None:
+async def _change_salesperson(query, data: str, context) -> None:
     try:
         _, _, action, raw_id = data.split(":")
         person_id = int(raw_id)
@@ -332,15 +436,20 @@ async def _change_salesperson(query, data: str) -> None:
             await query.edit_message_text("Salesperson was not found.")
             return
         person.active = action == "approve"
+        telegram_user_id = person.telegram_user_id
+        display_name = person.display_name
         await session.commit()
-        name = person.display_name
+    await _notify_salesperson(
+        context, telegram_user_id,
+        f"Your Petgenics salesperson account was {'approved' if action == 'approve' else 'deactivated'}.",
+    )
     await query.edit_message_text(
-        f"{name} is now {'approved' if action == 'approve' else 'deactivated'}.",
+        f"{display_name} is now {'approved' if action == 'approve' else 'deactivated'}.",
         reply_markup=_menu(),
     )
 
 
-async def _handle_order_action(query, data: str) -> None:
+async def _handle_order_action(query, data: str, context) -> None:
     try:
         _, _, action, raw_id = data.split(":")
         order_id = int(raw_id)
@@ -348,9 +457,19 @@ async def _handle_order_action(query, data: str) -> None:
         await query.edit_message_text("Invalid order action.")
         return
     if action in {"approve", "reject"}:
+        if action == "reject":
+            context.user_data["admin_input"] = {
+                "kind": "order_reject_reason", "order_id": order_id
+            }
+            await query.edit_message_text(
+                "Type a rejection reason, or send - for no reason. Use /cancel to stop."
+            )
+            return
         status = "Approved" if action == "approve" else "Rejected"
         async with SessionLocal() as session:
-            order = await session.get(Order, order_id)
+            order = await session.scalar(
+                select(Order).where(Order.id == order_id).with_for_update()
+            )
             if order is None:
                 await query.edit_message_text("Order not found.")
                 return
@@ -358,6 +477,8 @@ async def _handle_order_action(query, data: str) -> None:
                 await query.edit_message_text(f"Order is already {order.status}; no change was made.")
                 return
             order.status = status
+            person = await session.get(Salesperson, order.salesperson_id)
+            salesperson_user_id = person.telegram_user_id if person else None
             session.add(OrderAudit(
                 order_id=order.id,
                 actor=str(query.from_user.id),
@@ -366,7 +487,31 @@ async def _handle_order_action(query, data: str) -> None:
             ))
             await session.commit()
             order_number = order.order_number
+        await _notify_salesperson(
+            context, salesperson_user_id,
+            f"Your order {order_number} was {status.lower()} by the Petgenics administrator.",
+        )
         await query.edit_message_text(f"Order {order_number} {status.lower()}.", reply_markup=_menu())
+        return
+    if action == "pending":
+        async with SessionLocal() as session:
+            order = await session.scalar(select(Order).where(Order.id == order_id).with_for_update())
+            if order is None:
+                await query.edit_message_text("Order not found.")
+                return
+            if order.status not in {"Approved", "Rejected"}:
+                await query.edit_message_text(f"Order in {order.status} cannot be moved to pending.")
+                return
+            previous = order.status
+            order.status = "Submitted"
+            session.add(OrderAudit(
+                order_id=order.id,
+                actor=str(query.from_user.id),
+                action="returned_to_pending",
+                details={"previous_status": previous, "source": "telegram_admin"},
+            ))
+            await session.commit()
+        await query.edit_message_text("Order moved back to pending approval.")
         return
     if action in {"pdf", "xlsx", "marg"}:
         await _send_order_export(query, order_id, action)
@@ -467,38 +612,6 @@ def _order_pdf(order: Order, party: Party, person: Salesperson) -> bytes:
     return document.tobytes()
 
 
-async def _send_daily_report(query, report_date: date) -> None:
-    start = datetime.combine(report_date, time.min, timezone.utc)
-    end = start + timedelta(days=1)
-    async with SessionLocal() as session:
-        orders = list((await session.scalars(
-            select(Order).where(Order.created_at >= start, Order.created_at < end)
-            .options(selectinload(Order.items)).order_by(Order.created_at)
-        )).all())
-        rows = []
-        for order in orders:
-            party = await session.get(Party, order.party_id)
-            person = await session.get(Salesperson, order.salesperson_id)
-            for item in order.items:
-                rows.append([
-                    order.order_number, order.status, order.created_at.isoformat(),
-                    person.display_name if person else "", party.party_code if party else "",
-                    party.name if party else "", item.brand, item.product_code, item.product_name,
-                    item.pack_size, item.quantity, item.free_quantity, item.rate,
-                    item.discount_percent, item.line_total, order.remarks,
-                ])
-    headers = [
-        "order_number", "status", "date", "salesperson", "party_code", "party", "brand",
-        "product_code", "product", "pack", "quantity", "free_quantity", "rate",
-        "discount_percent", "line_total", "remarks",
-    ]
-    content = workbook_bytes(headers, rows)
-    await _send_file(
-        query, content, f"petgenics-orders-{report_date.isoformat()}.xlsx",
-        f"{len(orders)} order(s) on {report_date.isoformat()}.",
-    )
-
-
 async def _show_imports(query) -> None:
     async with SessionLocal() as session:
         batches = list((await session.scalars(
@@ -575,10 +688,16 @@ async def _send_file(query, content: bytes, filename: str, caption: str) -> None
 async def handle_admin_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
     kind = context.user_data.get("admin_import_kind")
-    if not kind or not _is_admin(context, user_id):
+    if not _is_admin(context, user_id):
         return False
     message = update.effective_message
     document = message.document
+    filename = document.file_name or "upload.xlsx" if document else ""
+    if not kind:
+        if Path(filename).suffix.lower() in {".xlsx", ".xls"}:
+            await message.reply_text("Open /admin → Bulk import, choose an import type, then upload the workbook.")
+            return True
+        return False
     if document is None:
         await message.reply_text("Please upload an .xlsx or .xls Excel workbook.")
         return True
@@ -779,5 +898,122 @@ async def _import_assignments(
 
 
 class _MessageQuery:
-    def __init__(self, message):
+    def __init__(self, message, from_user=None):
         self.message = message
+        self.from_user = from_user
+
+
+async def notify_admins_new_order(bot, order_id: int, admin_ids) -> None:
+    await _notify_admins_new_order(bot, order_id, admin_ids)
+
+
+async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    pending = context.user_data.get("admin_input")
+    if not pending:
+        return False
+    user_id = update.effective_user.id
+    if not _is_admin(context, user_id):
+        context.user_data.pop("admin_input", None)
+        await update.effective_message.reply_text("Administrator access is required.")
+        return True
+    value = (update.effective_message.text or "").strip()
+    if not value:
+        await update.effective_message.reply_text("Please send a non-empty value or use /cancel.")
+        return True
+
+    if await handle_report_text(update, context, value):
+        return True
+    if await handle_marg_text(update, context, value):
+        return True
+    if await handle_catalog_text(update, context, value):
+        return True
+    if await handle_people_text(update, context, value):
+        return True
+    kind = pending.get("kind")
+    if kind == "orders_search":
+        context.user_data.pop("admin_input", None)
+        await show_order_page(
+            _MessageQuery(update.effective_message, update.effective_user),
+            context, status_key="all", search=value
+        )
+        return True
+    if kind == "order_reject_reason":
+        context.user_data.pop("admin_input", None)
+        await _decide_order(
+            _MessageQuery(update.effective_message, update.effective_user),
+            context,
+            int(pending["order_id"]),
+            "Rejected",
+            None if value == "-" else value,
+        )
+        return True
+    context.user_data.pop("admin_input", None)
+    await update.effective_message.reply_text(
+        "That admin input session expired. Open /admin and try again."
+    )
+    return True
+
+
+async def _bulk_approve_orders(query, context) -> None:
+    async with SessionLocal() as session:
+        orders = list((await session.scalars(
+            select(Order).where(Order.status == "Submitted")
+            .order_by(Order.created_at).limit(100).with_for_update()
+        )).all())
+        notifications = []
+        for order in orders:
+            order.status = "Approved"
+            person = await session.get(Salesperson, order.salesperson_id)
+            notifications.append((person.telegram_user_id if person else None, order.order_number))
+            session.add(OrderAudit(
+                order_id=order.id,
+                actor=str(query.from_user.id),
+                action="approved",
+                details={"source": "telegram_admin_bulk"},
+            ))
+        await session.commit()
+    for telegram_id, order_number in notifications:
+        await _notify_salesperson(
+            context, telegram_id, f"Your Petgenics order {order_number} was approved."
+        )
+    await query.edit_message_text(f"Approved {len(orders)} pending order(s).")
+
+
+async def _decide_order(query, context, order_id: int, status: str, reason: str | None) -> None:
+    async with SessionLocal() as session:
+        order = await session.scalar(
+            select(Order).where(Order.id == order_id).with_for_update()
+        )
+        if order is None:
+            await query.message.reply_text("Order not found.")
+            return
+        if order.status != "Submitted":
+            await query.message.reply_text(
+                f"Order {order.order_number} is now {order.status}; no change was made."
+            )
+            return
+        order.status = status
+        person = await session.get(Salesperson, order.salesperson_id)
+        telegram_id = person.telegram_user_id if person else None
+        order_number = order.order_number
+        session.add(OrderAudit(
+            order_id=order.id,
+            actor=str(query.from_user.id),
+            action=status.casefold(),
+            details={"remarks": reason, "source": "telegram_admin"},
+        ))
+        await session.commit()
+    message = f"Your Petgenics order {order_number} was {status.lower()}."
+    if reason:
+        message += f"\nReason: {reason}"
+    await _notify_salesperson(context, telegram_id, message)
+    await query.message.reply_text(f"Order {order_number} {status.lower()}.")
+
+
+async def _notify_salesperson(context, telegram_id: int | None, text: str) -> None:
+    if telegram_id is None:
+        return
+    try:
+        await context.bot.send_message(chat_id=telegram_id, text=text)
+    except TelegramError:
+        logger.info("Could not notify the salesperson through Telegram.")

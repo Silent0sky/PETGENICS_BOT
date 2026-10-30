@@ -51,6 +51,7 @@ On the service-creation form, enter these in **Environment Variables**. If the s
 | `DATABASE_URL` | Paste the private Neon connection string. The app converts Neon’s PostgreSQL URL and SSL options for its async driver. |
 | `ADMIN_API_KEY` | Click **Generate** in Render; keep it private. This unlocks admin operations. |
 | `ADMIN_TELEGRAM_IDS` | Optional at first. After the new Telegram admin feature is deployed, send `/myid` to the bot and put that numeric ID here to enable `/admin`. |
+| `REPORT_UTC_OFFSET_MINUTES` | Optional; defaults to `330` (India Standard Time). Set another UTC offset in minutes only if reports should use a different fixed timezone. |
 | `HEALTH_CHECK_TOKEN` | Click **Generate** in Render; keep it private. |
 | `WEBHOOK_SECRET` | Click **Generate** in Render; keep it private. |
 
@@ -98,9 +99,9 @@ After the updated version is deployed:
 
 1. Send `/myid` to your bot and note the numeric ID it returns. Do not share it publicly.
 2. In Render → your service → **Environment**, add `ADMIN_TELEGRAM_IDS` with that number as its value, then save and wait for restart.
-3. Send `/admin` to the bot. Use the buttons to import product, party, and assignment Excel files; approve salespeople and orders; and download reports, products, parties, order PDFs, and order Excel files directly in Telegram. Use `/adminpermission TELEGRAM_ID yes/no MAX_DISCOUNT yes/no` to set a salesperson's discount and free-quantity permissions.
+3. Send `/admin` or tap **Admin panel**. Use the Telegram command menu and persistent reply keyboard as shortcuts; the inline buttons open paginated admin workflows for orders, people, catalogue, reports, imports, scanner runs, and MARG settings.
 4. Download the product, party, or assignment templates from the bot before filling them. Use stable party/product codes and exact brand names. New salespeople remain inactive until you approve them.
-5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`.
+5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`. Reports use India Standard Time by default (`REPORT_UTC_OFFSET_MINUTES=330`).
 
 The web dashboard and protected APIs remain available as a fallback. MARG export requires configuration from the actual MARG template; do not guess its columns.
 
