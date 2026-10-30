@@ -133,7 +133,8 @@ async def submit_draft(
         ):
             raise OrderPermissionError("The requested discount is not authorised.")
         total = line_total(quantity, rate, discount)
-        order.items.append(OrderItem(
+        session.add(OrderItem(
+            order_id=order.id,
             product_id=product.id,
             product_code=product.product_code,
             product_name=product.name,
@@ -156,7 +157,7 @@ async def submit_draft(
         order_id=order.id,
         actor=str(telegram_user_id),
         action="submitted",
-        details={"order_number": order.order_number, "items": len(order.items)},
+        details={"order_number": order.order_number, "items": len(items)},
     ))
     await session.commit()
     return order

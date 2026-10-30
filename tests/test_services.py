@@ -26,6 +26,7 @@ from petgenics.money import free_quantity_value, line_total, order_quantity, rat
 from petgenics.models import (
     Base,
     Order,
+    OrderAudit,
     OrderItem,
     Party,
     Product,
@@ -37,6 +38,81 @@ from petgenics.scanner import extract_document, match_lines
 
 def test_decimal_order_total_and_discount_rounding():
     assert line_total(Decimal("3"), Decimal("10.10"), Decimal("12.5")) == Decimal("26.51")
+
+
+def test_submit_draft_adds_items_without_lazy_loading_order_relationship():
+    from petgenics.orders import submit_draft
+
+    product = SimpleNamespace(
+        id=23,
+        active=True,
+        product_code="PET-001",
+        name="Pet Food",
+        brand="Company A",
+        pack_size="1 KG",
+        selling_rate=Decimal("12.50"),
+    )
+    salesperson = SimpleNamespace(
+        id=7,
+        telegram_user_id=123,
+        active=True,
+        allow_free_quantity=False,
+        allow_discount=False,
+        max_discount_percent=Decimal("0"),
+    )
+    order = SimpleNamespace(
+        id=42,
+        salesperson_id=salesperson.id,
+        party_id=99,
+        status="Draft",
+        draft_data={"items": [{
+            "product_id": product.id,
+            "product_code": product.product_code,
+            "product_name": product.name,
+            "brand": product.brand,
+            "quantity": "2",
+            "free_quantity": "0",
+            "rate": "12.50",
+            "discount_percent": "0",
+        }]},
+        order_number="PG-TEST",
+    )
+    items = order.draft_data["items"]
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        async def scalar(self, statement):
+            entity = statement.column_descriptions[0]["entity"]
+            if entity is Order:
+                return order
+            if entity is Salesperson:
+                return salesperson
+            return 1
+
+        async def get(self, model, identity):
+            assert model is Product
+            assert identity == product.id
+            return product
+
+        def add(self, instance):
+            self.added.append(instance)
+
+        async def commit(self):
+            pass
+
+    session = FakeSession()
+    submitted = asyncio.run(submit_draft(session, salesperson.telegram_user_id, order.id, items))
+
+    saved_item = next(instance for instance in session.added if isinstance(instance, OrderItem))
+    audit = next(instance for instance in session.added if isinstance(instance, OrderAudit))
+    assert submitted is order
+    assert saved_item.order_id == order.id
+    assert saved_item.quantity == Decimal("2")
+    assert saved_item.line_total == Decimal("25.00")
+    assert audit.details["items"] == 1
+    assert order.status == "Submitted"
 
 
 def test_neon_database_url_is_normalized_for_asyncpg_ssl():
@@ -236,7 +312,75 @@ def test_new_order_asks_for_company_before_parties(monkeypatch):
     assert callbacks == ["brand:0", "brand:1"]
 
 
-def test_company_choice_opens_party_list_with_add_party_action(monkeypatch):
+def test_admin_who_is_also_salesperson_can_continue_order_text_flow(monkeypatch):
+    from petgenics import telegram_bot
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self):
+            pass
+
+    saved = SimpleNamespace(state={
+        "step": "quantity",
+        "pending": {
+            "product_id": 23,
+            "product_code": "PET-001",
+            "product_name": "Pet Food",
+            "brand": "Company A",
+            "quantity": "0",
+            "free_quantity": "0",
+            "rate": "12.50",
+            "discount_percent": "0",
+        },
+        "items": [],
+    })
+    message = SimpleNamespace(text="2", replies=[])
+
+    async def reply_text(text, reply_markup=None):
+        message.replies.append(text)
+
+    message.reply_text = reply_text
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_message=message,
+    )
+    context = SimpleNamespace(
+        bot_data={"admin_telegram_ids": {123}},
+        user_data={},
+    )
+
+    async def fake_salesperson(session, user_id):
+        return SimpleNamespace(
+            id=7,
+            allow_free_quantity=False,
+            allow_discount=False,
+            max_discount_percent=Decimal("0"),
+        )
+
+    async def fake_saved_state(session, user_id):
+        return saved
+
+    async def fake_persist(session, row, state):
+        row.state = state
+
+    monkeypatch.setattr(telegram_bot, "SessionLocal", FakeSession)
+    monkeypatch.setattr(telegram_bot, "_salesperson", fake_salesperson)
+    monkeypatch.setattr(telegram_bot, "_saved_state", fake_saved_state)
+    monkeypatch.setattr(telegram_bot, "_persist_state", fake_persist)
+
+    asyncio.run(telegram_bot._text(update, context))
+
+    assert saved.state["items"][0]["quantity"] == "2"
+    assert saved.state["step"] == "search"
+    assert message.replies[-1] == "Added. Search another product in the same brand, or use /cart."
+
+
+def test_company_choice_shows_party_search_actions_instead_of_full_list(monkeypatch):
     from petgenics import telegram_bot
 
     class FakeSession:
@@ -254,7 +398,6 @@ def test_company_choice_opens_party_list_with_add_party_action(monkeypatch):
         "brand_choices": ["Company A"],
         "order_start": "company_first",
     })
-    party = Party(id=99, party_code="P-1", name="Assigned Shop", active=True)
     query = SimpleNamespace(
         data="brand:0",
         answers=0,
@@ -287,9 +430,6 @@ def test_company_choice_opens_party_list_with_add_party_action(monkeypatch):
     async def fake_brands(session, salesperson_id):
         return ["Company A"]
 
-    async def fake_parties(session, salesperson_id):
-        return [party]
-
     async def fake_persist(session, row, state):
         row.state = state
 
@@ -297,19 +437,38 @@ def test_company_choice_opens_party_list_with_add_party_action(monkeypatch):
     monkeypatch.setattr(telegram_bot, "_salesperson", fake_salesperson)
     monkeypatch.setattr(telegram_bot, "_saved_state", fake_saved_state)
     monkeypatch.setattr(telegram_bot, "accessible_brands", fake_brands)
-    monkeypatch.setattr(telegram_bot, "accessible_parties", fake_parties)
     monkeypatch.setattr(telegram_bot, "_persist_state", fake_persist)
 
     asyncio.run(telegram_bot._callback(update, context))
 
     assert saved.state["brand"] == "Company A"
     assert saved.state["step"] == "party_search"
+    assert "Search for a party by name/code" in query.edits[-1][0]
     callbacks = [
         button.callback_data
         for row in query.edits[-1][1].inline_keyboard
         for button in row
     ]
-    assert callbacks == ["party:99", "party:add"]
+    assert callbacks == ["party:search", "party:add"]
+
+    search_query = SimpleNamespace(data="party:search", answers=0, edits=[])
+
+    async def answer_search():
+        search_query.answers += 1
+
+    async def edit_search(text, reply_markup=None):
+        search_query.edits.append((text, reply_markup))
+
+    search_query.answer = answer_search
+    search_query.edit_message_text = edit_search
+    search_update = SimpleNamespace(
+        callback_query=search_query,
+        effective_user=SimpleNamespace(id=123),
+    )
+    asyncio.run(telegram_bot._callback(search_update, context))
+
+    assert search_query.answers == 1
+    assert "Type the party name or party code" in search_query.edits[-1][0]
 
 
 def test_new_party_is_active_and_assigned_only_to_requesting_salesperson(monkeypatch):

@@ -47,12 +47,16 @@ def _brand_buttons(brands: list[str]) -> InlineKeyboardMarkup:
     return _buttons([(brand, f"brand:{index}") for index, brand in enumerate(brands[:50])])
 
 
-def _party_buttons(parties: list[Party], allow_add: bool = False) -> InlineKeyboardMarkup:
+def _party_buttons(
+    parties: list[Party], allow_add: bool = False, allow_search: bool = False
+) -> InlineKeyboardMarkup:
     rows = []
     for party in parties[:50]:
         name = party.name if len(party.name) <= 40 else party.name[:39] + "…"
         code = party.party_code if len(party.party_code) <= 18 else party.party_code[:17] + "…"
         rows.append((f"{name} · {code}", f"party:{party.id}"))
+    if allow_search:
+        rows.append(("🔎 Search another party", "party:search"))
     if allow_add:
         rows.append(("➕ Add new party", "party:add"))
     return _buttons(rows)
@@ -346,13 +350,11 @@ async def _back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         elif step == "party_add_name" and state.get("order_start") == "company_first":
             state["step"] = "party_search"
-            salesperson = await _salesperson(session, update.effective_user.id)
-            parties = await accessible_parties(session, salesperson.id) if salesperson else []
             await _persist_state(session, saved, state)
             await session.commit()
             await update.effective_message.reply_text(
-                "Choose an assigned party or add one:",
-                reply_markup=_party_buttons(parties, allow_add=True),
+                "Search for a party by name/code, or add a new party:",
+                reply_markup=_party_buttons([], allow_add=True, allow_search=True),
             )
             return
         elif step == "party_search" and state.get("order_start") == "company_first":
@@ -414,16 +416,18 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _maybe_admin_input(update, context):
         return
     user_id = update.effective_user.id
-    if user_id in context.bot_data.get("admin_telegram_ids", set()):
-        await update.effective_message.reply_text(
-            "No admin text action is waiting. Use /admin to open the admin panel."
-        )
-        return
     text = (update.effective_message.text or "").strip()
     async with SessionLocal() as session:
         salesperson = await _salesperson(session, user_id)
         if salesperson is None:
-            await update.effective_message.reply_text("Your account is not approved. Contact your administrator.")
+            if user_id in context.bot_data.get("admin_telegram_ids", set()):
+                await update.effective_message.reply_text(
+                    "No admin text action is waiting. Use /admin to open the admin panel."
+                )
+            else:
+                await update.effective_message.reply_text(
+                    "Your account is not approved. Contact your administrator."
+                )
             return
         saved = await _saved_state(session, user_id)
         state = deepcopy(saved.state or {})
@@ -490,7 +494,7 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 can_add = state.get("order_start") == "company_first" and bool(state.get("brand"))
                 await update.effective_message.reply_text(
                     "No assigned party matched. Try another name/code or add a new party.",
-                    reply_markup=_party_buttons([], allow_add=can_add),
+                    reply_markup=_party_buttons([], allow_add=can_add, allow_search=can_add),
                 )
                 return
             await update.effective_message.reply_text(
@@ -498,6 +502,7 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=_party_buttons(
                     matches,
                     allow_add=state.get("order_start") == "company_first",
+                    allow_search=state.get("order_start") == "company_first",
                 ),
             )
             return
@@ -626,6 +631,24 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         saved = await _saved_state(session, user_id)
         state = saved.state or {}
         if data.startswith("party:"):
+            if data == "party:search":
+                if (
+                    state.get("step") != "party_search"
+                    or state.get("order_start") != "company_first"
+                    or state.get("draft_order_id")
+                    or not state.get("brand")
+                ):
+                    await query.edit_message_text("Start a new order and choose a company before searching parties.")
+                    return
+                brands = await accessible_brands(session, salesperson.id)
+                if state["brand"] not in brands:
+                    await query.edit_message_text("This company is no longer assigned to you.")
+                    return
+                await query.edit_message_text(
+                    f"Search parties for {state['brand']}.\n"
+                    "Type the party name or party code; matching results will appear."
+                )
+                return
             if data == "party:add":
                 if (
                     state.get("step") != "party_search"
@@ -834,13 +857,11 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if state.get("step") == "brand_select" and state.get("order_start") == "company_first":
                 state["brand"] = brand
                 state["step"] = "party_search"
-                parties = await accessible_parties(session, salesperson.id)
                 await _persist_state(session, saved, state)
                 await session.commit()
                 await query.edit_message_text(
-                    f"Company: {brand}\nSelect an assigned party below, or type a party name/code to search. "
-                    "You can also add a new party.",
-                    reply_markup=_party_buttons(parties, allow_add=True),
+                    f"Company: {brand}\nSearch for a party by name/code, or add a new party.",
+                    reply_markup=_party_buttons([], allow_add=True, allow_search=True),
                 )
                 return
             state["brand"] = brand
