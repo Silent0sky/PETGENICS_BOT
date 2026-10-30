@@ -105,7 +105,20 @@ After the updated version is deployed:
 
 The web dashboard and protected APIs remain available as a fallback. MARG export requires configuration from the actual MARG template; do not guess its columns.
 
-## 9. Test the Telegram bot
+## 9. Monitor the app with UptimeRobot
+
+The app is already ready for HTTP monitoring. Use the public `/healthz` URL; do not use `/health`, because that endpoint requires a secret header.
+
+1. Make sure Render shows the service as **Live**. Open `https://YOUR-SERVICE-URL/healthz`; it should show `{"status":"ok"}`.
+2. Sign in at [UptimeRobot](https://uptimerobot.com/) and add a new **HTTP(s)** monitor.
+3. Enter a name such as `Petgenics Telegram Bot`.
+4. For the URL, enter the exact Render URL followed by `/healthz`, for example `https://your-service.onrender.com/healthz`. Do not add a trailing secret or token.
+5. Choose the available check interval and select an alert contact (email is simplest). Save the monitor.
+6. Confirm UptimeRobot reports **Up**. Use **Test** or wait for its first check if needed.
+
+UptimeRobot checks whether the web endpoint responds; it does not restart a failed Render service or test that Telegram orders work. If it reports **Down**, open Render → service → **Events** and **Logs**, check that the service is **Live**, then open `/healthz` yourself. Render Free services can sleep and take time to wake, so the first check after inactivity may be slow. Monitoring is not a way to guarantee the free service stays awake. Also test the bot in Telegram separately.
+
+## 10. Test the Telegram bot
 
 1. In Telegram, open the bot created with BotFather and send `/start`.
 2. If the salesperson is approved and has assignments, try `/order`.
@@ -114,7 +127,7 @@ The web dashboard and protected APIs remain available as a fallback. MARG export
 
 The bot cannot create an order until you import at least one active party and product, then configure an approved salesperson with that party and product brand.
 
-## 10. Backups and future code updates
+## 11. Backups and future code updates
 
 - Neon Free has limited usage and recovery features. Export important test data and do not rely on the free database as the only copy of business records. Product lists, parties, orders, and drafts are stored in PostgreSQL, not on the temporary Render web-service disk.
 - To update code, make the changes locally, run `python -m pytest -q`, commit and push them to the GitHub `main` branch. Render will deploy the new commit automatically if auto-deploy is enabled.

@@ -414,7 +414,9 @@ def test_api_health_and_admin_routes_enforce_separate_secrets():
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            assert (await client.get("/healthz")).status_code == 200
+            response = await client.get("/healthz")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok"}
             assert (await client.get("/health")).status_code == 401
             assert (await client.get("/admin/orders")).status_code == 401
 

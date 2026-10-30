@@ -45,6 +45,10 @@ Render Free web services sleep after 15 minutes without traffic and can take abo
 
 The Telegram secret is read from the environment, used as the webhook path component and checked again against Telegram's webhook secret header. Do not paste bot tokens into source files, commits, tickets, or logs. Rotate a token if it is accidentally disclosed.
 
+### UptimeRobot monitoring
+
+The public `https://YOUR-RENDER-SERVICE.onrender.com/healthz` endpoint is ready for UptimeRobot and is also Render's configured health-check path. Create an **HTTP(s)** monitor for that full URL; it returns HTTP 200 with `{"status":"ok"}`. Do not monitor `/health` because that endpoint requires a secret header. UptimeRobot reports endpoint availability but does not restart Render or verify Telegram ordering; free Render services may sleep and take time to wake.
+
 ### Telegram admin menu
 
 Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` or tap **Admin panel** to review orders, manage salespeople/catalogue, import workbooks, download date-wise reports, and access scanner/MARG settings. Salespeople and administrators receive a persistent reply keyboard and Telegram command menu; admin-only commands are scoped to configured admin chats. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. `/adminpermission ID yes/no MAX_DISCOUNT yes/no` sets salesperson discount and free-quantity permissions. Use `/myid` to find your Telegram user ID. `REPORT_UTC_OFFSET_MINUTES` sets the reporting timezone offset from UTC; the default `330` is India Standard Time. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
