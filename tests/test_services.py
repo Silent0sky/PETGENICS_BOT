@@ -23,7 +23,15 @@ from petgenics.excel_io import preview_workbook, read_mapped_rows, workbook_byte
 from petgenics.imports import duplicate_code_rows
 from petgenics.marg import order_rows, validate_mapping
 from petgenics.money import free_quantity_value, line_total, order_quantity, rate_value
-from petgenics.models import Base, Order, OrderItem, Party, Product, Salesperson
+from petgenics.models import (
+    Base,
+    Order,
+    OrderItem,
+    Party,
+    Product,
+    Salesperson,
+    SalespersonParty,
+)
 from petgenics.scanner import extract_document, match_lines
 
 
@@ -166,6 +174,228 @@ def test_admin_callbacks_reject_unconfigured_telegram_accounts():
     asyncio.run(admin_callback(update, context))
     assert query.answered
     assert query.edited_text == "Administrator access is required."
+
+
+def test_new_order_asks_for_company_before_parties(monkeypatch):
+    from petgenics import telegram_bot
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self):
+            pass
+
+    class FakeMessage:
+        def __init__(self):
+            self.replies = []
+
+        async def reply_text(self, text, reply_markup=None):
+            self.replies.append((text, reply_markup))
+
+    saved = SimpleNamespace(state={})
+    salesperson = SimpleNamespace(id=7)
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot_data={"admin_telegram_ids": set()}, user_data={})
+
+    async def fake_salesperson(session, user_id):
+        return salesperson
+
+    async def fake_saved_state(session, user_id):
+        return saved
+
+    async def fake_brands(session, salesperson_id):
+        return ["Company A", "Company B"]
+
+    async def fake_persist(session, row, state):
+        row.state = state
+
+    monkeypatch.setattr(telegram_bot, "SessionLocal", FakeSession)
+    monkeypatch.setattr(telegram_bot, "_salesperson", fake_salesperson)
+    monkeypatch.setattr(telegram_bot, "_saved_state", fake_saved_state)
+    monkeypatch.setattr(telegram_bot, "accessible_brands", fake_brands)
+    monkeypatch.setattr(telegram_bot, "_persist_state", fake_persist)
+
+    asyncio.run(telegram_bot._order(update, context))
+
+    assert saved.state["step"] == "brand_select"
+    assert saved.state["brand_choices"] == ["Company A", "Company B"]
+    assert message.replies[-1][0] == "First select the company / brand:"
+    callbacks = [
+        button.callback_data
+        for row in message.replies[-1][1].inline_keyboard
+        for button in row
+    ]
+    assert callbacks == ["brand:0", "brand:1"]
+
+
+def test_company_choice_opens_party_list_with_add_party_action(monkeypatch):
+    from petgenics import telegram_bot
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self):
+            pass
+
+    saved = SimpleNamespace(state={
+        "step": "brand_select",
+        "brand_choices": ["Company A"],
+        "order_start": "company_first",
+    })
+    party = Party(id=99, party_code="P-1", name="Assigned Shop", active=True)
+    query = SimpleNamespace(
+        data="brand:0",
+        answers=0,
+        edits=[],
+    )
+
+    async def answer():
+        query.answers += 1
+
+    async def edit_message_text(text, reply_markup=None):
+        query.edits.append((text, reply_markup))
+
+    query.answer = answer
+    query.edit_message_text = edit_message_text
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=123),
+    )
+    context = SimpleNamespace(
+        bot_data={"admin_telegram_ids": set()},
+        user_data={},
+    )
+
+    async def fake_salesperson(session, user_id):
+        return SimpleNamespace(id=7)
+
+    async def fake_saved_state(session, user_id):
+        return saved
+
+    async def fake_brands(session, salesperson_id):
+        return ["Company A"]
+
+    async def fake_parties(session, salesperson_id):
+        return [party]
+
+    async def fake_persist(session, row, state):
+        row.state = state
+
+    monkeypatch.setattr(telegram_bot, "SessionLocal", FakeSession)
+    monkeypatch.setattr(telegram_bot, "_salesperson", fake_salesperson)
+    monkeypatch.setattr(telegram_bot, "_saved_state", fake_saved_state)
+    monkeypatch.setattr(telegram_bot, "accessible_brands", fake_brands)
+    monkeypatch.setattr(telegram_bot, "accessible_parties", fake_parties)
+    monkeypatch.setattr(telegram_bot, "_persist_state", fake_persist)
+
+    asyncio.run(telegram_bot._callback(update, context))
+
+    assert saved.state["brand"] == "Company A"
+    assert saved.state["step"] == "party_search"
+    callbacks = [
+        button.callback_data
+        for row in query.edits[-1][1].inline_keyboard
+        for button in row
+    ]
+    assert callbacks == ["party:99", "party:add"]
+
+
+def test_new_party_is_active_and_assigned_only_to_requesting_salesperson(monkeypatch):
+    from petgenics import telegram_bot
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def scalar(self, statement):
+            return None
+
+        def add(self, instance):
+            self.added.append(instance)
+            if isinstance(instance, Party):
+                instance.id = 99
+
+        async def flush(self):
+            pass
+
+        async def commit(self):
+            pass
+
+    fake_session = FakeSession()
+    saved = SimpleNamespace(state={
+        "step": "party_add_name",
+        "order_start": "company_first",
+        "brand": "Company A",
+    })
+    salesperson = SimpleNamespace(id=7)
+    message = SimpleNamespace(text="New Pet Shop", replies=[])
+
+    async def reply_text(text, reply_markup=None):
+        message.replies.append(text)
+
+    message.reply_text = reply_text
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_message=message,
+    )
+    context = SimpleNamespace(
+        bot_data={"admin_telegram_ids": set()},
+        user_data={},
+    )
+
+    async def fake_salesperson(session, user_id):
+        return salesperson
+
+    async def fake_saved_state(session, user_id):
+        return saved
+
+    async def fake_brands(session, salesperson_id):
+        return ["Company A"]
+
+    async def fake_persist(session, row, state):
+        row.state = state
+
+    async def fake_create_draft(session, user_id, party_id):
+        return SimpleNamespace(id=42)
+
+    monkeypatch.setattr(telegram_bot, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(telegram_bot, "_salesperson", fake_salesperson)
+    monkeypatch.setattr(telegram_bot, "_saved_state", fake_saved_state)
+    monkeypatch.setattr(telegram_bot, "accessible_brands", fake_brands)
+    monkeypatch.setattr(telegram_bot, "_persist_state", fake_persist)
+    monkeypatch.setattr(telegram_bot, "create_draft", fake_create_draft)
+
+    asyncio.run(telegram_bot._text(update, context))
+
+    party = next(item for item in fake_session.added if isinstance(item, Party))
+    assignment = next(item for item in fake_session.added if isinstance(item, SalespersonParty))
+    assert party.name == "New Pet Shop"
+    assert party.active is True
+    assert party.party_code.startswith("NEW-")
+    assert assignment.salesperson_id == salesperson.id
+    assert assignment.party_id == party.id
+    assert saved.state["party_id"] == party.id
+    assert saved.state["brand"] == "Company A"
+    assert saved.state["step"] == "search"
+    assert "actual ERP party code" in message.replies[-1]
 
 
 def test_admin_callback_payloads_obey_telegram_size_limit():

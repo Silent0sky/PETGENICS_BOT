@@ -12,6 +12,7 @@ Python 3.11+ order intake for Petgenics, backed by PostgreSQL. The Telegram bot 
 - Digital-PDF text extraction, OCR for scanned PDF pages and images, explicit scanner review, and a configurable PostgreSQL file-retention period.
 - Admin-configured MARG column mapping. No MARG import headers or rules are assumed.
 - Telegram admin panel with searchable/paginated orders, salesperson and catalogue management, reports, imports, MARG/scanner controls, and a persistent command/reply-keyboard menu. Access is restricted to numeric IDs in `ADMIN_TELEGRAM_IDS`.
+- Salesperson order flow starts with assigned company/brand selection, then an assigned-party button list. Salespeople can add a party by name; it is immediately active and assigned only to that salesperson, with a temporary internal code that an admin should replace with the actual ERP party code before MARG export.
 - Docker/Render configuration and a PostgreSQL schema baseline.
 
 The five supplied price lists are intentionally **not** pre-imported: their columns differ, some have no brand column, and importing them without an administrator mapping/brand choice would guess product information. Preview each workbook and explicitly map its columns and brand before importing it.
@@ -97,7 +98,7 @@ The stable product code is required. New products also need a name and a mapped 
 - List configured people and assignments with `GET /admin/salespersons`.
 - Approve/deactivate an existing account without changing its assignments using `PATCH /admin/salespersons/{telegram_user_id}/approval`.
 
-Salespeople can only select assigned parties and brands. Account approval is by numeric Telegram user ID; display names are not used as identity.
+Salespeople can only select assigned parties and brands. New parties entered by a salesperson are assigned only to that salesperson. They receive a generated internal code until an admin replaces it with the ERP party code. Account approval is by numeric Telegram user ID; display names are not used as identity.
 
 ### Orders and exports
 

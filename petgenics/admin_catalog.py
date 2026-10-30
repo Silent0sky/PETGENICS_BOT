@@ -326,13 +326,24 @@ async def _party_callback(query, context, data: str) -> bool:
             reply_markup=inline_keyboard([
                 [("Rename", f"admin:party:edit:{party.id}:name"),
                  (("Deactivate" if party.active else "Activate"), f"admin:party:toggle:{party.id}")],
+                [("Set ERP party code", f"admin:party:edit:{party.id}:party_code")],
                 [("Back", "admin:parties")],
             ]),
         )
         return True
     if len(parts) == 5 and parts[2] == "edit":
-        context.user_data["admin_input"] = {"kind": "party_edit", "party_id": int(parts[3])}
-        await query.edit_message_text("Send the new party name.")
+        field = parts[4]
+        if field not in {"name", "party_code"}:
+            await query.edit_message_text("Unsupported party field.")
+            return True
+        context.user_data["admin_input"] = {
+            "kind": "party_edit", "party_id": int(parts[3]), "field": field
+        }
+        prompt = (
+            "Send the actual ERP party code (1 to 120 characters)."
+            if field == "party_code" else "Send the new party name."
+        )
+        await query.edit_message_text(prompt)
         return True
     if len(parts) == 4 and parts[2] == "toggle":
         party_id = int(parts[3])
@@ -478,8 +489,14 @@ async def handle_catalog_text(update, context, value: str) -> bool:
         return True
     if kind == "party_edit":
         party_id = pending["party_id"]
-        if not value.strip() or len(value.strip()) > 300:
-            await update.effective_message.reply_text("Party name is required and must be 300 characters or less.")
+        field = pending.get("field", "name")
+        new_value = value.strip()
+        max_length = 120 if field == "party_code" else 300
+        if not new_value or len(new_value) > max_length:
+            await update.effective_message.reply_text(
+                f"{'Party code' if field == 'party_code' else 'Party name'} "
+                f"must contain 1 to {max_length} characters."
+            )
             return True
         async with SessionLocal() as session:
             party = await session.get(Party, party_id)
@@ -487,10 +504,21 @@ async def handle_catalog_text(update, context, value: str) -> bool:
                 await update.effective_message.reply_text("Party not found.")
                 context.user_data.pop("admin_input", None)
                 return True
-            party.name = value.strip()
+            if field == "party_code":
+                duplicate = await session.scalar(select(Party.id).where(
+                    Party.party_code == new_value, Party.id != party_id
+                ))
+                if duplicate is not None:
+                    await update.effective_message.reply_text("That party code is already in use.")
+                    return True
+                party.party_code = new_value
+            else:
+                party.name = new_value
             await session.commit()
         context.user_data.pop("admin_input", None)
-        await update.effective_message.reply_text("Party name updated.")
+        await update.effective_message.reply_text(
+            "ERP party code updated." if field == "party_code" else "Party name updated."
+        )
         return True
     return False
 

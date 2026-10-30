@@ -125,7 +125,7 @@ UptimeRobot checks whether the web endpoint responds; it does not restart a fail
 3. Submit a small test order and check that it appears in the admin page.
 4. If Telegram does not respond, check that `BOT_TOKEN` is valid, `WEBHOOK_URL` is the exact public HTTPS service URL, and the Render service is **Live**.
 
-The bot cannot create an order until you import at least one active party and product, then configure an approved salesperson with that party and product brand.
+When a salesperson taps **New order**, they choose an assigned company/brand first, then select an assigned party from the buttons (or search by typing). They may tap **Add new party** and enter its name; the party becomes active for that salesperson only. The bot assigns a temporary internal code automatically. An admin should open that party in **Admin panel → Parties → Set ERP party code** and replace it with the real ERP code before exporting to MARG. The salesperson still needs at least one assigned company/brand and matching active products to place orders.
 
 ## 11. Backups and future code updates
 

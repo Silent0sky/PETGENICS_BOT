@@ -4,10 +4,11 @@ import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from copy import deepcopy
+from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -22,7 +23,16 @@ from petgenics.admin_telegram import (
 )
 from petgenics.bot_menu import ALL_BUTTON_LABELS, MENU_ACTIONS, reply_keyboard
 from petgenics.db import SessionLocal
-from petgenics.models import BotSession, Order, OrderAudit, Product, Salesperson, ScannerRun
+from petgenics.models import (
+    BotSession,
+    Order,
+    OrderAudit,
+    Party,
+    Product,
+    Salesperson,
+    SalespersonParty,
+    ScannerRun,
+)
 from petgenics.orders import accessible_brands, accessible_parties, create_draft, submit_draft
 from petgenics.scanner import analyze_document
 from petgenics.money import discount_value, free_quantity_value, order_quantity
@@ -35,6 +45,17 @@ def _buttons(rows: list[tuple[str, str]], width: int = 2) -> InlineKeyboardMarku
 
 def _brand_buttons(brands: list[str]) -> InlineKeyboardMarkup:
     return _buttons([(brand, f"brand:{index}") for index, brand in enumerate(brands[:50])])
+
+
+def _party_buttons(parties: list[Party], allow_add: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    for party in parties[:50]:
+        name = party.name if len(party.name) <= 40 else party.name[:39] + "…"
+        code = party.party_code if len(party.party_code) <= 18 else party.party_code[:17] + "…"
+        rows.append((f"{name} · {code}", f"party:{party.id}"))
+    if allow_add:
+        rows.append(("➕ Add new party", "party:add"))
+    return _buttons(rows)
 
 
 async def _saved_state(session, user_id: int) -> BotSession:
@@ -199,16 +220,20 @@ async def _order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=_brand_buttons(brands),
             )
             return
-        parties = await accessible_parties(session, salesperson.id)
-        if not parties:
-            await update.effective_message.reply_text("No parties are assigned to your account.")
+        brands = await accessible_brands(session, salesperson.id)
+        if not brands:
+            await update.effective_message.reply_text("No companies/brands are assigned to your account.")
             return
-        state["step"] = "party_search"
+        state = {
+            "step": "brand_select",
+            "brand_choices": brands,
+            "order_start": "company_first",
+        }
         await _persist_state(session, saved, state)
         await session.commit()
         await update.effective_message.reply_text(
-            "Select a customer party or type its name/code to search:",
-            reply_markup=_buttons([(f"{p.name} · {p.party_code}", f"party:{p.id}") for p in parties[:50]]),
+            "First select the company / brand:",
+            reply_markup=_brand_buttons(brands),
         )
 
 
@@ -319,6 +344,30 @@ async def _back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             message = "Choose a brand:"
             await update.effective_message.reply_text(message, reply_markup=_brand_buttons(brands))
             return
+        elif step == "party_add_name" and state.get("order_start") == "company_first":
+            state["step"] = "party_search"
+            salesperson = await _salesperson(session, update.effective_user.id)
+            parties = await accessible_parties(session, salesperson.id) if salesperson else []
+            await _persist_state(session, saved, state)
+            await session.commit()
+            await update.effective_message.reply_text(
+                "Choose an assigned party or add one:",
+                reply_markup=_party_buttons(parties, allow_add=True),
+            )
+            return
+        elif step == "party_search" and state.get("order_start") == "company_first":
+            salesperson = await _salesperson(session, update.effective_user.id)
+            brands = await accessible_brands(session, salesperson.id) if salesperson else []
+            state["step"] = "brand_select"
+            state["brand_choices"] = brands
+            state.pop("brand", None)
+            await _persist_state(session, saved, state)
+            await session.commit()
+            await update.effective_message.reply_text(
+                "Previous step: choose a company / brand.",
+                reply_markup=_brand_buttons(brands),
+            )
+            return
         else:
             message = "Use /order to select or search for a customer party."
         await _persist_state(session, saved, state)
@@ -379,6 +428,58 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         saved = await _saved_state(session, user_id)
         state = deepcopy(saved.state or {})
         step = state.get("step")
+        if step == "party_add_name":
+            name = text.strip()
+            if not name or len(name) > 300:
+                await update.effective_message.reply_text(
+                    "Party name must contain 1 to 300 characters. Send the name or use /cancel."
+                )
+                return
+            if state.get("order_start") != "company_first" or not state.get("brand"):
+                await update.effective_message.reply_text(
+                    "Party creation is only available after choosing a company. Use /order to restart."
+                )
+                return
+            brands = await accessible_brands(session, salesperson.id)
+            if state["brand"] not in brands:
+                await update.effective_message.reply_text(
+                    "Your company assignment changed. Use /order to choose an authorized company."
+                )
+                return
+            duplicate = await session.scalar(
+                select(Party.id).where(func.lower(Party.name) == name.casefold())
+            )
+            if duplicate is not None:
+                await update.effective_message.reply_text(
+                    "A party with this name already exists. Ask your admin to assign it to your account."
+                )
+                return
+            party_code = f"NEW-{uuid4().hex[:16].upper()}"
+            party = Party(party_code=party_code, name=name, active=True)
+            session.add(party)
+            await session.flush()
+            session.add(SalespersonParty(salesperson_id=salesperson.id, party_id=party.id))
+            await session.flush()
+            draft = await create_draft(session, user_id, party.id)
+            state = {
+                "draft_order_id": draft.id,
+                "party_id": party.id,
+                "party_name": party.name,
+                "brand": state["brand"],
+                "brand_choices": brands,
+                "items": [],
+                "step": "search",
+                "order_start": "company_first",
+            }
+            await _persist_state(session, saved, state)
+            await session.commit()
+            await update.effective_message.reply_text(
+                f"Party created and assigned to your account.\n"
+                f"Party: {party.name}\nTemporary internal code: {party_code}\n"
+                "Ask your admin to replace this with the actual ERP party code before MARG export.\n"
+                f"Company: {state['brand']}\nSend a product code or name to search."
+            )
+            return
         if step == "party_search":
             parties = await accessible_parties(session, salesperson.id)
             matches = [
@@ -386,11 +487,18 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 if text.casefold() in party.name.casefold() or text.casefold() in party.party_code.casefold()
             ][:50]
             if not matches:
-                await update.effective_message.reply_text("No assigned party matched. Try its name or stable code.")
+                can_add = state.get("order_start") == "company_first" and bool(state.get("brand"))
+                await update.effective_message.reply_text(
+                    "No assigned party matched. Try another name/code or add a new party.",
+                    reply_markup=_party_buttons([], allow_add=can_add),
+                )
                 return
             await update.effective_message.reply_text(
                 "Select a matching party:",
-                reply_markup=_buttons([(f"{p.name} · {p.party_code}", f"party:{p.id}") for p in matches]),
+                reply_markup=_party_buttons(
+                    matches,
+                    allow_add=state.get("order_start") == "company_first",
+                ),
             )
             return
         if step == "search":
@@ -518,11 +626,40 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         saved = await _saved_state(session, user_id)
         state = saved.state or {}
         if data.startswith("party:"):
+            if data == "party:add":
+                if (
+                    state.get("step") != "party_search"
+                    or state.get("order_start") != "company_first"
+                    or state.get("draft_order_id")
+                    or not state.get("brand")
+                ):
+                    await query.edit_message_text("Start a new order and choose a company before adding a party.")
+                    return
+                brands = await accessible_brands(session, salesperson.id)
+                if state["brand"] not in brands:
+                    await query.edit_message_text("This company is no longer assigned to you.")
+                    return
+                state["step"] = "party_add_name"
+                await _persist_state(session, saved, state)
+                await session.commit()
+                await query.edit_message_text(
+                    "Send the party name. A temporary internal code will be generated; "
+                    "ask your admin to replace it with the ERP party code before MARG export."
+                )
+                return
             party_id = int(data.split(":", 1)[1])
             parties = await accessible_parties(session, salesperson.id)
             party = next((p for p in parties if p.id == party_id), None)
             if party is None:
                 await query.edit_message_text("This party is not assigned to you.")
+                return
+            company_first = state.get("order_start") == "company_first"
+            selected_brand = state.get("brand") if company_first else None
+            if company_first and (
+                state.get("step") != "party_search"
+                or selected_brand not in await accessible_brands(session, salesperson.id)
+            ):
+                await query.edit_message_text("Choose an authorized company before selecting a party.")
                 return
             existing_draft_id = state.get("draft_order_id")
             if existing_draft_id:
@@ -558,12 +695,20 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "draft_order_id": draft.id, "party_id": party.id, "party_name": party.name,
                 "items": scan_items, "step": "search",
             }
+            if selected_brand:
+                state["brand"] = selected_brand
             if first_brand:
                 state["brand"] = first_brand
             brands = await accessible_brands(session, salesperson.id)
             state["brand_choices"] = brands
             await _persist_state(session, saved, state)
             await session.commit()
+            if selected_brand:
+                await query.edit_message_text(
+                    f"Company: {selected_brand}\nParty: {party.name}\n"
+                    "Send a product code or name to search."
+                )
+                return
             await query.edit_message_text(
                 f"Party: {party.name}\n"
                 f"{len(scan_items)} confirmed scanner line(s) added to the editable draft.\n"
@@ -654,7 +799,7 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             await query.edit_message_text(
                 message,
-                reply_markup=_buttons([(f"{p.name} · {p.party_code}", f"party:{p.id}") for p in parties[:50]]),
+                reply_markup=_party_buttons(parties),
             )
             return
         if data.startswith("scan-discard:"):
@@ -685,6 +830,18 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             if brand not in brands:
                 await query.edit_message_text("This brand is not assigned to you.")
+                return
+            if state.get("step") == "brand_select" and state.get("order_start") == "company_first":
+                state["brand"] = brand
+                state["step"] = "party_search"
+                parties = await accessible_parties(session, salesperson.id)
+                await _persist_state(session, saved, state)
+                await session.commit()
+                await query.edit_message_text(
+                    f"Company: {brand}\nSelect an assigned party below, or type a party name/code to search. "
+                    "You can also add a new party.",
+                    reply_markup=_party_buttons(parties, allow_add=True),
+                )
                 return
             state["brand"] = brand
             state["step"] = "search"
