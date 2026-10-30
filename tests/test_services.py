@@ -34,10 +34,87 @@ from petgenics.models import (
     SalespersonParty,
 )
 from petgenics.scanner import extract_document, match_lines
+from petgenics.text_orders import parse_text_order, text_match_score
+from petgenics.telegram_bot import _text_order_keyboard, _text_order_preview
 
 
 def test_decimal_order_total_and_discount_rounding():
     assert line_total(Decimal("3"), Decimal("10.10"), Decimal("12.5")) == Decimal("26.51")
+
+
+def test_pasted_text_order_parses_party_quantities_and_free_items():
+    order = parse_text_order(
+        "Wholcell pet shop nanded\n"
+        "Sheen n kleen 100ml 16+4\n"
+        "Fefollet 4+1\n"
+        "Freedom 360 500mg 4+2"
+    )
+
+    assert order["party_name"] == "Wholcell pet shop nanded"
+    assert [(item["product_query"], item["quantity"], item["free_quantity"]) for item in order["items"]] == [
+        ("Sheen n kleen 100ml", "16", "4"),
+        ("Fefollet", "4", "1"),
+        ("Freedom 360 500mg", "4", "2"),
+    ]
+
+
+def test_pasted_text_order_rejects_ambiguous_format_and_multiple_parties():
+    for text in (
+        "Party\nProduct 3 net (5+1)",
+        "Party A\nProduct 1+0\nParty B\nProduct 2+1",
+        "Party\nProduct 0+1",
+    ):
+        try:
+            parse_text_order(text)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid pasted order format was accepted.")
+
+
+def test_text_order_product_matching_suggests_catalog_variants_for_confirmation():
+    assert text_match_score("Sheen n kleen 100ml", "SHEEN-N-KLEEN FORTE 100 ML") > 0.9
+    assert text_match_score("Fefollet", "FE-FOLATE 200 ML") > 0.7
+    assert text_match_score("Freedom 360 500mg", "FREEDOM 360 TABLET 500MG") > 0.9
+    assert text_match_score("PRODUCT-CODE-1", "Product 1kg PRODUCT-CODE-1") > 0.9
+
+
+def test_pasted_text_review_shows_catalog_details_and_product_search():
+    salesperson = SimpleNamespace(allow_free_quantity=True)
+    state = {
+        "text_order_party_name": "Party",
+        "text_order_items": [{
+            "product_query": "Product 1 kg",
+            "quantity": "2",
+            "free_quantity": "1",
+            "candidates": [{"id": 7, "name": "Product", "brand": "Brand"}],
+            "selected": {
+                "id": 7,
+                "code": "PET-001",
+                "name": "Product",
+                "brand": "Brand",
+                "pack_size": "1 KG",
+                "mrp": "20.00",
+                "rate": "15.00",
+                "stock": "12.000",
+                "confidence": 1,
+            },
+        }],
+    }
+
+    preview, can_confirm = _text_order_preview(state, salesperson)
+    callback_data = {
+        button.callback_data
+        for row in _text_order_keyboard(state, can_confirm).inline_keyboard
+        for button in row
+    }
+
+    assert can_confirm
+    assert "PET-001" in preview
+    assert "MRP: ₹20.00" in preview
+    assert "Stock: 12.000" in preview
+    assert "Rate: ₹15.00" in preview
+    assert "textorder:search:0" in callback_data
 
 
 def test_submit_draft_adds_items_without_lazy_loading_order_relationship():

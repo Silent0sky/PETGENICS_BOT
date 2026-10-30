@@ -35,7 +35,8 @@ from petgenics.models import (
 )
 from petgenics.orders import accessible_brands, accessible_parties, create_draft, submit_draft
 from petgenics.scanner import analyze_document
-from petgenics.money import discount_value, free_quantity_value, order_quantity
+from petgenics.money import discount_value, free_quantity_value, line_total, order_quantity
+from petgenics.text_orders import parse_text_order, text_match_score
 
 
 def _buttons(rows: list[tuple[str, str]], width: int = 2) -> InlineKeyboardMarkup:
@@ -60,6 +61,117 @@ def _party_buttons(
     if allow_add:
         rows.append(("➕ Add new party", "party:add"))
     return _buttons(rows)
+
+
+def _text_order_keyboard(state: dict, allow_confirm: bool) -> InlineKeyboardMarkup:
+    rows = []
+    for index, item in enumerate(state.get("text_order_items", [])):
+        rows.append((f"🔎 Search product {index + 1}", f"textorder:search:{index}"))
+        for candidate in item.get("candidates", []):
+            name = candidate["name"]
+            brand = candidate["brand"]
+            if len(name) > 34:
+                name = name[:33] + "…"
+            if len(brand) > 18:
+                brand = brand[:17] + "…"
+            rows.append((
+                f"{index + 1}. {name} · {brand}",
+                f"textorder:item:{index}:{candidate['id']}",
+            ))
+    if allow_confirm:
+        rows.append(("✅ Confirm and submit order", "textorder:confirm"))
+    rows.append(("❌ Discard text order", "textorder:cancel"))
+    return _buttons(rows)
+
+
+def _text_order_preview(state: dict, salesperson: Salesperson) -> tuple[str, bool]:
+    def short(value: object, limit: int) -> str:
+        text = str(value)
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    lines = [
+        "Review pasted order before submission:",
+        f"Party: {short(state['text_order_party_name'], 120)}",
+    ]
+    items = state.get("text_order_items", [])
+    total = Decimal("0")
+    all_matched = bool(items)
+    has_free_quantity = False
+    for index, item in enumerate(items):
+        selected = item.get("selected")
+        if selected is None:
+            all_matched = False
+            lines.append(
+                f"{index + 1}. {short(item['source_text'], 90)}"
+                "\n   Product: not selected — choose a match below."
+            )
+            continue
+        quantity = Decimal(item["quantity"])
+        free_quantity = Decimal(item["free_quantity"])
+        has_free_quantity = has_free_quantity or free_quantity > 0
+        product_name = short(selected["name"], 32)
+        brand = short(selected["brand"], 16)
+        pack_size = short(selected.get("pack_size") or "not set", 16)
+        mrp = short(f"₹{selected['mrp']}", 16) if selected.get("mrp") is not None else "not set"
+        stock = short(selected["stock"], 16) if selected.get("stock") is not None else "not set"
+        product_query = short(item["product_query"], 32)
+        lines.append(
+            f"{index + 1}. {product_query} → {product_name} ({brand})"
+        )
+        lines.append(
+            f"   Code: {selected['code']} · Pack: {pack_size} · "
+            f"MRP: {mrp} · Stock: {stock}"
+        )
+        if selected.get("rate") is None:
+            all_matched = False
+            lines.append(
+                "   Selling rate is missing; ask an admin to update this product."
+            )
+            continue
+        try:
+            line_total_value = line_total(quantity, Decimal(selected["rate"]), Decimal("0"))
+        except ValueError:
+            all_matched = False
+            lines.append("   Quantity or total is outside the supported order limit.")
+            continue
+        total += line_total_value
+        confidence_note = " · suggested match — verify" if selected.get("confidence", 1) < 1 else ""
+        lines.append(
+            f"   {short(quantity, 14)} ordered + {short(free_quantity, 14)} free · "
+            f"Rate: ₹{short(selected['rate'], 16)}"
+            f"{confidence_note}"
+        )
+    lines.append(f"Subtotal before discounts: ₹{total:.2f}")
+    free_allowed = salesperson.allow_free_quantity
+    if has_free_quantity and not free_allowed:
+        all_matched = False
+        lines.append("Free quantity is not enabled for your account. Ask an admin to authorize it.")
+    if all_matched:
+        lines.append("Tap Confirm and submit order, or choose another product match above.")
+    else:
+        lines.append("Resolve all product matches and permissions before submitting.")
+    return "\n".join(lines), all_matched
+
+
+def _rank_text_matches(
+    query: str, candidates: list[Any], label, limit: int = 3
+) -> list[tuple[Any, float]]:
+    ranked = [(candidate, text_match_score(query, label(candidate))) for candidate in candidates]
+    return sorted(ranked, key=lambda match: (-match[1], label(match[0]).casefold()))[:limit]
+
+
+def _text_product_candidate(product: Product, confidence: float) -> dict:
+    return {
+        "id": product.id,
+        "code": product.product_code,
+        "name": product.name,
+        "brand": product.brand,
+        "pack_size": product.pack_size,
+        "mrp": str(product.mrp) if product.mrp is not None else None,
+        "rate": str(product.selling_rate) if product.selling_rate is not None else None,
+        "stock": str(product.stock) if product.stock is not None else None,
+        "confidence": round(confidence, 3),
+    }
 
 
 async def _saved_state(session, user_id: int) -> BotSession:
@@ -431,6 +543,94 @@ async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         saved = await _saved_state(session, user_id)
         state = deepcopy(saved.state or {})
+        search_index = state.get("text_order_search_index")
+        if state.get("step") == "text_order_review" and search_index is not None:
+            try:
+                item_index = int(search_index)
+                item = state["text_order_items"][item_index]
+            except (ValueError, IndexError, KeyError):
+                await update.effective_message.reply_text(
+                    "That product search is no longer available. Discard the pasted order and try again."
+                )
+                return
+            brands = set(await accessible_brands(session, salesperson.id))
+            matching_products = list((await session.scalars(select(Product).where(
+                Product.active.is_(True),
+                Product.brand.in_(brands),
+                (Product.name.ilike(f"%{text}%"))
+                | (Product.product_code.ilike(f"%{text}%")),
+            ).order_by(Product.name).limit(30))).all()) if brands else []
+            ranked_products = _rank_text_matches(
+                text,
+                matching_products,
+                lambda product: f"{product.name} {product.pack_size or ''} {product.product_code}",
+            )
+            item["candidates"] = [
+                _text_product_candidate(product, score)
+                for product, score in ranked_products
+            ]
+            item["selected"] = None
+            state.pop("text_order_search_index", None)
+            preview, can_confirm = _text_order_preview(state, salesperson)
+            await _persist_state(session, saved, state)
+            await session.commit()
+            await update.effective_message.reply_text(
+                preview if matching_products else (
+                    f"No products matched “{text}”. Search another product name/code "
+                    "or discard the pasted order."
+                ),
+                reply_markup=_text_order_keyboard(state, can_confirm),
+            )
+            return
+        if "\n" in text and "+" in text:
+            try:
+                parsed_order = parse_text_order(text)
+            except ValueError as exc:
+                await update.effective_message.reply_text(str(exc))
+                return
+            draft_id = state.get("draft_order_id")
+            if draft_id:
+                current_draft = await session.get(Order, int(draft_id))
+                if current_draft is not None and current_draft.status == "Draft":
+                    await update.effective_message.reply_text(
+                        "Finish or cancel your current order before starting a pasted text order."
+                    )
+                    return
+            parties = await accessible_parties(session, salesperson.id)
+            party_matches = _rank_text_matches(
+                parsed_order["party_name"],
+                parties,
+                lambda party: f"{party.name} {party.party_code}",
+                limit=8,
+            )
+            if not party_matches or party_matches[0][1] < 0.2:
+                await update.effective_message.reply_text(
+                    f"No assigned party resembles “{parsed_order['party_name']}”. "
+                    "Ask an admin to assign the party, then send the text order again."
+                )
+                return
+            state = {
+                "step": "text_order_party",
+                "pending_text_order": parsed_order,
+                "text_order_party_candidates": [
+                    {"id": party.id, "name": party.name, "code": party.party_code}
+                    for party, _score in party_matches
+                ],
+            }
+            await _persist_state(session, saved, state)
+            await session.commit()
+            markup = _buttons([
+                (
+                    f"{party.name[:40]} · {party.party_code[:14]}",
+                    f"textorder:party:{party.id}",
+                )
+                for party, _score in party_matches
+            ])
+            await update.effective_message.reply_text(
+                f"Choose the party matching “{parsed_order['party_name']}”:",
+                reply_markup=markup,
+            )
+            return
         step = state.get("step")
         if step == "party_add_name":
             name = text.strip()
@@ -630,6 +830,229 @@ async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         saved = await _saved_state(session, user_id)
         state = saved.state or {}
+        if data.startswith("textorder:"):
+            if data == "textorder:cancel":
+                if state.get("step") not in {"text_order_party", "text_order_review"}:
+                    await query.edit_message_text("There is no pasted text order to discard.")
+                    return
+                saved.state = {}
+                await session.commit()
+                await query.edit_message_text("Pasted text order discarded.")
+                return
+
+            if data.startswith("textorder:party:"):
+                if state.get("step") != "text_order_party":
+                    await query.edit_message_text("That pasted order is no longer waiting for party selection.")
+                    return
+                try:
+                    party_id = int(data.rsplit(":", 1)[1])
+                except ValueError:
+                    await query.edit_message_text("Invalid party selection.")
+                    return
+                if party_id not in {
+                    int(candidate["id"])
+                    for candidate in state.get("text_order_party_candidates", [])
+                }:
+                    await query.edit_message_text("That party was not offered for this pasted order.")
+                    return
+                parties = await accessible_parties(session, salesperson.id)
+                party = next((candidate for candidate in parties if candidate.id == party_id), None)
+                if party is None:
+                    await query.edit_message_text("This party is no longer assigned to you.")
+                    return
+                brands = set(await accessible_brands(session, salesperson.id))
+                products = list((await session.scalars(select(Product).where(
+                    Product.active.is_(True),
+                    Product.brand.in_(brands),
+                ))).all()) if brands else []
+                pending = state["pending_text_order"]
+                matched_items = []
+                for item in pending["items"]:
+                    ranked = _rank_text_matches(
+                        item["product_query"],
+                        products,
+                        lambda product: (
+                            f"{product.name} {product.pack_size or ''} {product.product_code}"
+                        ),
+                    )
+                    candidates = [
+                        _text_product_candidate(product, score)
+                        for product, score in ranked if score >= 0.35
+                    ]
+                    selected = None
+                    if candidates:
+                        first_score = candidates[0]["confidence"]
+                        second_score = candidates[1]["confidence"] if len(candidates) > 1 else 0
+                        if first_score >= 0.95 and first_score - second_score >= 0.12:
+                            selected = dict(candidates[0])
+                    matched_items.append({**item, "candidates": candidates, "selected": selected})
+                state["step"] = "text_order_review"
+                state["text_order_party_id"] = party.id
+                state["text_order_party_name"] = party.name
+                state["text_order_items"] = matched_items
+                state.pop("pending_text_order", None)
+                state.pop("text_order_party_candidates", None)
+                preview, can_confirm = _text_order_preview(state, salesperson)
+                await _persist_state(session, saved, state)
+                await session.commit()
+                await query.edit_message_text(
+                    preview,
+                    reply_markup=_text_order_keyboard(state, can_confirm),
+                )
+                return
+
+            if data.startswith("textorder:search:"):
+                if state.get("step") != "text_order_review":
+                    await query.edit_message_text("That pasted order is no longer waiting for product review.")
+                    return
+                try:
+                    item_index = int(data.rsplit(":", 1)[1])
+                    state["text_order_items"][item_index]
+                except (ValueError, IndexError, KeyError):
+                    await query.edit_message_text("That product search is no longer available.")
+                    return
+                state["text_order_search_index"] = item_index
+                await _persist_state(session, saved, state)
+                await session.commit()
+                await query.edit_message_text(
+                    f"Send a product name, pack size, or product code for line {item_index + 1}."
+                )
+                return
+
+            if data.startswith("textorder:item:"):
+                if state.get("step") != "text_order_review":
+                    await query.edit_message_text("That pasted order is no longer waiting for product review.")
+                    return
+                try:
+                    _, _, raw_index, raw_product_id = data.split(":")
+                    item_index, product_id = int(raw_index), int(raw_product_id)
+                    item = state["text_order_items"][item_index]
+                    candidate = next(
+                        match for match in item.get("candidates", [])
+                        if int(match["id"]) == product_id
+                    )
+                except (ValueError, IndexError, KeyError, StopIteration):
+                    await query.edit_message_text("That product match is no longer available.")
+                    return
+                product = await session.get(Product, product_id)
+                allowed_brands = set(await accessible_brands(session, salesperson.id))
+                if (
+                    product is None
+                    or not product.active
+                    or product.brand not in allowed_brands
+                    or product.product_code != candidate["code"]
+                ):
+                    await query.edit_message_text("That product is no longer available to your account.")
+                    return
+                item["selected"] = _text_product_candidate(
+                    product, float(candidate.get("confidence", 1))
+                )
+                state.pop("text_order_search_index", None)
+                preview, can_confirm = _text_order_preview(state, salesperson)
+                await _persist_state(session, saved, state)
+                await session.commit()
+                await query.edit_message_text(
+                    preview,
+                    reply_markup=_text_order_keyboard(state, can_confirm),
+                )
+                return
+
+            if data == "textorder:confirm":
+                if state.get("step") != "text_order_review":
+                    await query.edit_message_text("That pasted order is no longer waiting for confirmation.")
+                    return
+                product_ids = {
+                    int(item["selected"]["id"])
+                    for item in state.get("text_order_items", [])
+                    if item.get("selected") is not None
+                }
+                products = {
+                    product.id: product
+                    for product in (await session.scalars(
+                        select(Product)
+                        .where(Product.id.in_(product_ids))
+                        .order_by(Product.id)
+                        .with_for_update()
+                    )).all()
+                } if product_ids else {}
+                allowed_brands = set(await accessible_brands(session, salesperson.id))
+                catalog_changed = False
+                for item in state.get("text_order_items", []):
+                    selected = item.get("selected")
+                    if selected is None:
+                        continue
+                    product = products.get(int(selected["id"]))
+                    if (
+                        product is None
+                        or not product.active
+                        or product.brand not in allowed_brands
+                        or product.product_code != selected["code"]
+                    ):
+                        await query.edit_message_text(
+                            "A selected product is no longer available to your account. "
+                            "Discard this pasted order and start again."
+                        )
+                        return
+                    refreshed = _text_product_candidate(
+                        product, float(selected.get("confidence", 1))
+                    )
+                    if refreshed != selected:
+                        item["selected"] = refreshed
+                        catalog_changed = True
+                if catalog_changed:
+                    preview, can_confirm = _text_order_preview(state, salesperson)
+                    await _persist_state(session, saved, state)
+                    await session.commit()
+                    await query.edit_message_text(
+                        "Catalog details changed since your last review. Check the updated details "
+                        "and confirm again.\n\n" + preview,
+                        reply_markup=_text_order_keyboard(state, can_confirm),
+                    )
+                    return
+                _preview, can_confirm = _text_order_preview(state, salesperson)
+                if not can_confirm:
+                    await query.edit_message_text(
+                        "This order is not ready. Match every product and ask an admin to enable "
+                        "free quantities if needed."
+                    )
+                    return
+                items = []
+                for item in state["text_order_items"]:
+                    selected = item["selected"]
+                    items.append({
+                        "product_id": int(selected["id"]),
+                        "product_code": selected["code"],
+                        "product_name": selected["name"],
+                        "brand": selected["brand"],
+                        "pack_size": selected["pack_size"],
+                        "quantity": item["quantity"],
+                        "free_quantity": item["free_quantity"],
+                        "rate": selected["rate"],
+                        "discount_percent": "0",
+                    })
+                try:
+                    draft = await create_draft(
+                        session, user_id, int(state["text_order_party_id"])
+                    )
+                    draft.draft_data = {"items": items}
+                    order = await submit_draft(
+                        session, user_id, draft.id, items
+                    )
+                except (ValueError, KeyError) as exc:
+                    await query.edit_message_text(f"Order was not submitted: {exc}")
+                    return
+                saved.state = {}
+                await session.commit()
+                await query.edit_message_text(
+                    f"Order {order.order_number} submitted for approval."
+                )
+                from petgenics.admin_telegram import notify_admins_new_order
+
+                await notify_admins_new_order(
+                    context.bot, order.id, context.bot_data.get("admin_telegram_ids", ())
+                )
+                return
+
         if data.startswith("party:"):
             if data == "party:search":
                 if (
