@@ -11,7 +11,7 @@ Python 3.11+ order intake for Petgenics, backed by PostgreSQL. The Telegram bot 
 - Decimal order totals, discount/free-quantity authorization, order review/status decisions and date-wise reports.
 - Digital-PDF text extraction, OCR for scanned PDF pages and images, explicit scanner review, and a configurable PostgreSQL file-retention period.
 - Admin-configured MARG column mapping. No MARG import headers or rules are assumed.
-- Telegram admin menu for order decisions, salesperson approvals, Excel imports/downloads, import error reports, and per-order PDF/internal/MARG exports. Access is restricted to numeric IDs in `ADMIN_TELEGRAM_IDS`.
+- Telegram admin panel with searchable/paginated orders, salesperson and catalogue management, reports, imports, MARG/scanner controls, and a persistent command/reply-keyboard menu. Access is restricted to numeric IDs in `ADMIN_TELEGRAM_IDS`.
 - Docker/Render configuration and a PostgreSQL schema baseline.
 
 The five supplied price lists are intentionally **not** pre-imported: their columns differ, some have no brand column, and importing them without an administrator mapping/brand choice would guess product information. Preview each workbook and explicitly map its columns and brand before importing it.
@@ -45,9 +45,13 @@ Render Free web services sleep after 15 minutes without traffic and can take abo
 
 The Telegram secret is read from the environment, used as the webhook path component and checked again against Telegram's webhook secret header. Do not paste bot tokens into source files, commits, tickets, or logs. Rotate a token if it is accidentally disclosed.
 
+### UptimeRobot monitoring
+
+The public `https://YOUR-RENDER-SERVICE.onrender.com/healthz` endpoint is ready for UptimeRobot and is also Render's configured health-check path. Create an **HTTP(s)** monitor for that full URL; it returns HTTP 200 with `{"status":"ok"}`. Do not monitor `/health` because that endpoint requires a secret header. UptimeRobot reports endpoint availability but does not restart Render or verify Telegram ordering; free Render services may sleep and take time to wake.
+
 ### Telegram admin menu
 
-Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` to review and decide orders, approve/deactivate salespeople, import product/party/assignment workbooks, download full lists and date-wise reports, and receive per-order PDF/internal Excel exports in Telegram. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. `/adminpermission ID yes/no MAX_DISCOUNT yes/no` sets salesperson discount and free-quantity permissions. Use `/myid` to find your Telegram user ID. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
+Set `ADMIN_TELEGRAM_IDS` to one or more comma-separated numeric Telegram user IDs. Each administrator can send `/admin` or tap **Admin panel** to review orders, manage salespeople/catalogue, import workbooks, download date-wise reports, and access scanner/MARG settings. Salespeople and administrators receive a persistent reply keyboard and Telegram command menu; admin-only commands are scoped to configured admin chats. `/adminreport YYYY-MM-DD` downloads a date-wise order workbook. `/adminpermission ID yes/no MAX_DISCOUNT yes/no` sets salesperson discount and free-quantity permissions. Use `/myid` to find your Telegram user ID. `REPORT_UTC_OFFSET_MINUTES` sets the reporting timezone offset from UTC; the default `330` is India Standard Time. MARG exports remain gated on configuring the actual MARG template mapping first; no MARG column names are assumed.
 
 ### PostgreSQL backups and recovery
 

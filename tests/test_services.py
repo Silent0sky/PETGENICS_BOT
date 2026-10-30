@@ -2,12 +2,22 @@ import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 import io
+from types import SimpleNamespace
 
 import httpx
 from openpyxl import Workbook
 from sqlalchemy import create_mock_engine
 
 from petgenics.api import create_app
+from petgenics.admin_ui import inline_keyboard, paginate, parse_report_range, period_range, report_day_bounds
+from petgenics.bot_menu import (
+    ADMIN_COMMANDS,
+    ALL_BUTTON_LABELS,
+    DEFAULT_COMMANDS,
+    MENU_ACTIONS,
+    register_bot_menu,
+    reply_keyboard,
+)
 from petgenics.config import Settings, _normalize_database_url, get_settings
 from petgenics.excel_io import preview_workbook, read_mapped_rows, workbook_bytes
 from petgenics.imports import duplicate_code_rows
@@ -42,6 +52,144 @@ def test_admin_telegram_ids_are_parsed_and_deduplicated(monkeypatch):
     monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "12345,67890,12345")
 
     assert get_settings().admin_telegram_ids == (12345, 67890)
+
+
+def test_report_dates_use_ist_boundaries_and_accept_two_formats():
+    assert parse_report_range("2026-10-29") == (
+        datetime(2026, 10, 29).date(), datetime(2026, 10, 29).date()
+    )
+    assert parse_report_range("29-10-2026 to 30-10-2026") == (
+        datetime(2026, 10, 29).date(), datetime(2026, 10, 30).date()
+    )
+    assert report_day_bounds(datetime(2026, 10, 30).date(), 330) == (
+        datetime(2026, 10, 29, 18, 30, tzinfo=timezone.utc),
+        datetime(2026, 10, 30, 18, 30, tzinfo=timezone.utc),
+    )
+
+
+def test_report_range_rejects_reversed_or_oversized_ranges():
+    for value in ("2026-10-30 to 2026-10-29", "2024-01-01 to 2026-10-29"):
+        try:
+            parse_report_range(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid report range was accepted.")
+
+
+def test_report_periods_and_pagination():
+    today = datetime(2026, 10, 30).date()
+    assert period_range("last7", today) == (
+        datetime(2026, 10, 24).date(), today
+    )
+    assert period_range("lastmonth", today) == (
+        datetime(2026, 9, 1).date(), datetime(2026, 9, 30).date()
+    )
+    page, index, pages = paginate(list(range(19)), 4, 8)
+    assert (page, index, pages) == ([16, 17, 18], 2, 3)
+
+
+def test_telegram_commands_and_reply_keyboard_fit_platform_limits():
+    for command in DEFAULT_COMMANDS + ADMIN_COMMANDS:
+        assert 1 <= len(command.command) <= 32
+        assert all(character.islower() or character.isdigit() or character == "_" for character in command.command)
+        assert 3 <= len(command.description) <= 256
+    assert len(ALL_BUTTON_LABELS) == len(set(ALL_BUTTON_LABELS))
+    assert set(ALL_BUTTON_LABELS) == set(MENU_ACTIONS)
+    for keyboard in (reply_keyboard(False), reply_keyboard(True)):
+        assert keyboard.resize_keyboard
+        assert keyboard.is_persistent
+
+
+def test_bot_command_menu_registers_user_scopes_and_chat_menu_button():
+    class FakeBot:
+        def __init__(self):
+            self.command_calls = []
+            self.menu_button = None
+
+        async def set_my_commands(self, commands, scope):
+            self.command_calls.append((commands, scope))
+
+        async def set_chat_menu_button(self, menu_button):
+            self.menu_button = menu_button
+
+    bot = FakeBot()
+    asyncio.run(register_bot_menu(bot, (123, 456)))
+    assert len(bot.command_calls) == 3
+    assert bot.command_calls[0][0] == DEFAULT_COMMANDS
+    assert bot.command_calls[1][0] == ADMIN_COMMANDS
+    assert bot.command_calls[1][1].chat_id == 123
+    assert bot.command_calls[2][1].chat_id == 456
+    assert bot.menu_button is not None
+
+
+def test_scanner_admin_callback_passes_context_to_action(monkeypatch):
+    from petgenics import admin_reports
+
+    calls = []
+
+    async def fake_scanner_action(query, context, data):
+        calls.append((query, context, data))
+
+    monkeypatch.setattr(admin_reports, "scanner_action", fake_scanner_action)
+    query = SimpleNamespace()
+    context = SimpleNamespace(bot_data={}, user_data={})
+    update = SimpleNamespace(callback_query=query)
+
+    assert asyncio.run(
+        admin_reports.route_report_callback(update, context, "admin:scanner:purge:confirm")
+    )
+    assert calls == [(query, context, "admin:scanner:purge:confirm")]
+
+
+def test_admin_callbacks_reject_unconfigured_telegram_accounts():
+    from petgenics.admin_telegram import admin_callback
+
+    class FakeQuery:
+        def __init__(self):
+            self.answered = False
+            self.message = None
+            self.edited_text = None
+
+        async def answer(self):
+            self.answered = True
+
+        async def edit_message_text(self, text):
+            self.edited_text = text
+
+    query = FakeQuery()
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=999),
+    )
+    context = SimpleNamespace(bot_data={"admin_telegram_ids": {123}}, user_data={})
+    asyncio.run(admin_callback(update, context))
+    assert query.answered
+    assert query.edited_text == "Administrator access is required."
+
+
+def test_admin_callback_payloads_obey_telegram_size_limit():
+    callbacks = [
+        "admin:dashboard",
+        "admin:orders:filter:submitted",
+        "admin:orders:page:submitted:99",
+        "admin:orders:bulk:apply",
+        "admin:detail:2147483647",
+        "admin:order:reject:2147483647",
+        "admin:people:party_toggle:2147483647:2147483647",
+        "admin:people:party_add_all:apply:2147483647",
+        "admin:scanner:delete:confirm:2147483647",
+        "admin:report:lastmonth",
+        "admin:product:edit:2147483647:selling_rate",
+    ]
+    for callback in callbacks:
+        assert len(callback.encode("utf-8")) <= 64
+    try:
+        inline_keyboard([[("Too long", "a" * 65)]])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Oversized callback data was accepted.")
 
 
 def test_negative_quantity_and_out_of_range_discount_are_rejected():
@@ -266,7 +414,9 @@ def test_api_health_and_admin_routes_enforce_separate_secrets():
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            assert (await client.get("/healthz")).status_code == 200
+            response = await client.get("/healthz")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok"}
             assert (await client.get("/health")).status_code == 401
             assert (await client.get("/admin/orders")).status_code == 401
 

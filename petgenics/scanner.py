@@ -4,7 +4,6 @@ import io
 import os
 import re
 import subprocess
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 

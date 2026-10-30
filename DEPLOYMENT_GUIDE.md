@@ -51,6 +51,7 @@ On the service-creation form, enter these in **Environment Variables**. If the s
 | `DATABASE_URL` | Paste the private Neon connection string. The app converts Neon’s PostgreSQL URL and SSL options for its async driver. |
 | `ADMIN_API_KEY` | Click **Generate** in Render; keep it private. This unlocks admin operations. |
 | `ADMIN_TELEGRAM_IDS` | Optional at first. After the new Telegram admin feature is deployed, send `/myid` to the bot and put that numeric ID here to enable `/admin`. |
+| `REPORT_UTC_OFFSET_MINUTES` | Optional; defaults to `330` (India Standard Time). Set another UTC offset in minutes only if reports should use a different fixed timezone. |
 | `HEALTH_CHECK_TOKEN` | Click **Generate** in Render; keep it private. |
 | `WEBHOOK_SECRET` | Click **Generate** in Render; keep it private. |
 
@@ -98,13 +99,26 @@ After the updated version is deployed:
 
 1. Send `/myid` to your bot and note the numeric ID it returns. Do not share it publicly.
 2. In Render → your service → **Environment**, add `ADMIN_TELEGRAM_IDS` with that number as its value, then save and wait for restart.
-3. Send `/admin` to the bot. Use the buttons to import product, party, and assignment Excel files; approve salespeople and orders; and download reports, products, parties, order PDFs, and order Excel files directly in Telegram. Use `/adminpermission TELEGRAM_ID yes/no MAX_DISCOUNT yes/no` to set a salesperson's discount and free-quantity permissions.
+3. Send `/admin` or tap **Admin panel**. Use the Telegram command menu and persistent reply keyboard as shortcuts; the inline buttons open paginated admin workflows for orders, people, catalogue, reports, imports, scanner runs, and MARG settings.
 4. Download the product, party, or assignment templates from the bot before filling them. Use stable party/product codes and exact brand names. New salespeople remain inactive until you approve them.
-5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`.
+5. To download a date-wise Excel report, send `/adminreport YYYY-MM-DD`, for example `/adminreport 2026-10-29`. Reports use India Standard Time by default (`REPORT_UTC_OFFSET_MINUTES=330`).
 
 The web dashboard and protected APIs remain available as a fallback. MARG export requires configuration from the actual MARG template; do not guess its columns.
 
-## 9. Test the Telegram bot
+## 9. Monitor the app with UptimeRobot
+
+The app is already ready for HTTP monitoring. Use the public `/healthz` URL; do not use `/health`, because that endpoint requires a secret header.
+
+1. Make sure Render shows the service as **Live**. Open `https://YOUR-SERVICE-URL/healthz`; it should show `{"status":"ok"}`.
+2. Sign in at [UptimeRobot](https://uptimerobot.com/) and add a new **HTTP(s)** monitor.
+3. Enter a name such as `Petgenics Telegram Bot`.
+4. For the URL, enter the exact Render URL followed by `/healthz`, for example `https://your-service.onrender.com/healthz`. Do not add a trailing secret or token.
+5. Choose the available check interval and select an alert contact (email is simplest). Save the monitor.
+6. Confirm UptimeRobot reports **Up**. Use **Test** or wait for its first check if needed.
+
+UptimeRobot checks whether the web endpoint responds; it does not restart a failed Render service or test that Telegram orders work. If it reports **Down**, open Render → service → **Events** and **Logs**, check that the service is **Live**, then open `/healthz` yourself. Render Free services can sleep and take time to wake, so the first check after inactivity may be slow. Monitoring is not a way to guarantee the free service stays awake. Also test the bot in Telegram separately.
+
+## 10. Test the Telegram bot
 
 1. In Telegram, open the bot created with BotFather and send `/start`.
 2. If the salesperson is approved and has assignments, try `/order`.
@@ -113,7 +127,7 @@ The web dashboard and protected APIs remain available as a fallback. MARG export
 
 The bot cannot create an order until you import at least one active party and product, then configure an approved salesperson with that party and product brand.
 
-## 10. Backups and future code updates
+## 11. Backups and future code updates
 
 - Neon Free has limited usage and recovery features. Export important test data and do not rely on the free database as the only copy of business records. Product lists, parties, orders, and drafts are stored in PostgreSQL, not on the temporary Render web-service disk.
 - To update code, make the changes locally, run `python -m pytest -q`, commit and push them to the GitHub `main` branch. Render will deploy the new commit automatically if auto-deploy is enabled.

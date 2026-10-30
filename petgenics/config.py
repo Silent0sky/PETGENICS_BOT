@@ -34,6 +34,7 @@ class Settings:
     default_currency: str
     tesseract_cmd: str | None
     admin_telegram_ids: tuple[int, ...] = ()
+    report_utc_offset_minutes: int = 330
 
 
 def get_settings() -> Settings:
@@ -53,6 +54,12 @@ def get_settings() -> Settings:
         raise RuntimeError("ADMIN_TELEGRAM_IDS must be comma-separated numeric Telegram user IDs.") from exc
     if any(user_id <= 0 for user_id in admin_telegram_ids):
         raise RuntimeError("ADMIN_TELEGRAM_IDS must contain positive Telegram user IDs.")
+    try:
+        report_utc_offset_minutes = int(os.getenv("REPORT_UTC_OFFSET_MINUTES", "330"))
+    except ValueError as exc:
+        raise RuntimeError("REPORT_UTC_OFFSET_MINUTES must be an integer.") from exc
+    if not -720 <= report_utc_offset_minutes <= 840:
+        raise RuntimeError("REPORT_UTC_OFFSET_MINUTES must be between -720 and 840.")
     return Settings(
         bot_token=os.getenv("BOT_TOKEN") or None,
         webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
@@ -66,4 +73,5 @@ def get_settings() -> Settings:
         default_currency=os.getenv("DEFAULT_CURRENCY", "INR"),
         tesseract_cmd=os.getenv("TESSERACT_CMD") or None,
         admin_telegram_ids=admin_telegram_ids,
+        report_utc_offset_minutes=report_utc_offset_minutes,
     )

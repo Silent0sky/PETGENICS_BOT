@@ -69,7 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        from petgenics.db import SessionLocal, engine
+        from petgenics.db import engine
 
         if not settings.admin_api_key:
             raise RuntimeError("ADMIN_API_KEY must be configured before starting the service.")
@@ -90,8 +90,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings.max_upload_mb * 1024 * 1024,
                 settings.scanner_retention_hours,
                 settings.admin_telegram_ids,
+                settings.report_utc_offset_minutes,
             )
             await bot.initialize()
+            from petgenics.bot_menu import register_bot_menu
+
+            await register_bot_menu(bot.bot, settings.admin_telegram_ids)
             await bot.start()
             app.state.bot = bot
             url = settings.webhook_url.rstrip("/") + f"/webhook/{settings.webhook_secret}"

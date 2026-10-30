@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 from petgenics.excel_io import workbook_bytes
 from petgenics.models import Order, Party, Salesperson
 

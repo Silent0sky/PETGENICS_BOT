@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from copy import deepcopy
@@ -19,6 +20,7 @@ from petgenics.admin_telegram import (
     handle_admin_document,
     my_id,
 )
+from petgenics.bot_menu import ALL_BUTTON_LABELS, MENU_ACTIONS, reply_keyboard
 from petgenics.db import SessionLocal
 from petgenics.models import BotSession, Order, OrderAudit, Product, Salesperson, ScannerRun
 from petgenics.orders import accessible_brands, accessible_parties, create_draft, submit_draft
@@ -89,19 +91,22 @@ async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user.id in context.bot_data.get("admin_telegram_ids", set()):
         await update.effective_message.reply_text(
-            "Welcome, Petgenics administrator. Use /admin for admin tools or /help for commands."
+            "Welcome, Petgenics administrator. Use /admin for admin tools or /help for commands.",
+            reply_markup=reply_keyboard(True),
         )
         return
     async with SessionLocal() as session:
         salesperson = await _salesperson(session, user.id)
     if salesperson is None:
         await update.effective_message.reply_text(
-            "Your Telegram account is not approved yet. Please ask your Petgenics administrator to approve it."
+            "Your Telegram account is not approved yet. Please ask your Petgenics administrator to approve it.",
+            reply_markup=reply_keyboard(False),
         )
         return
     await update.effective_message.reply_text(
         f"Welcome, {salesperson.display_name}. Use /order to start an order, /cart to review it, "
-        "/switchbrand to change brands, /cancel to clear it, or /help for commands."
+        "/switchbrand to change brands, /cancel to clear it, or /help for commands.",
+        reply_markup=reply_keyboard(False),
     )
 
 
@@ -120,7 +125,10 @@ async def _help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/adminorder ORDER_NUMBER - download files for an older order (admins only)\n"
         "/adminreport YYYY-MM-DD - download a date-wise order Excel (admins only)\n"
         "/adminpermission ID yes/no MAX_DISCOUNT yes/no - set discount/free quantity permissions\n"
-        "You can also send a PDF, JPG or PNG order sheet for scanner-assisted review."
+        "You can also send a PDF, JPG or PNG order sheet for scanner-assisted review.",
+        reply_markup=reply_keyboard(
+            update.effective_user.id in context.bot_data.get("admin_telegram_ids", set())
+        ),
     )
 
 
@@ -158,8 +166,17 @@ async def _order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with SessionLocal() as session:
         salesperson = await _salesperson(session, update.effective_user.id)
         if salesperson is None:
-            await update.effective_message.reply_text("Your account is not approved. Contact your administrator.")
+            await update.effective_message.reply_text(
+                "Your account is not approved. Contact your administrator.",
+                reply_markup=reply_keyboard(
+                    update.effective_user.id in context.bot_data.get("admin_telegram_ids", set())
+                ),
+            )
             return
+        await update.effective_message.reply_text(
+            "Order buttons are ready below. You can also type a party, product, or quantity.",
+            reply_markup=reply_keyboard(False),
+        )
         saved = await _saved_state(session, update.effective_user.id)
         state = saved.state or {}
         if state.get("draft_order_id") and state.get("party_id") and state.get("brand"):
@@ -196,6 +213,8 @@ async def _order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("admin_input", None)
+    context.user_data.pop("admin_import_kind", None)
     async with SessionLocal() as session:
         saved = await _saved_state(session, update.effective_user.id)
         order_id = (saved.state or {}).get("draft_order_id")
@@ -205,7 +224,12 @@ async def _cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await session.delete(order)
         saved.state = {}
         await session.commit()
-    await update.effective_message.reply_text("Unfinished order cleared.")
+    await update.effective_message.reply_text(
+        "Unfinished order cleared.",
+        reply_markup=reply_keyboard(
+            update.effective_user.id in context.bot_data.get("admin_telegram_ids", set())
+        ),
+    )
 
 
 async def _cart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -303,6 +327,8 @@ async def _back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _maybe_admin_input(update, context):
+        return
     async with SessionLocal() as session:
         saved = await _saved_state(session, update.effective_user.id)
         state = saved.state or {}
@@ -322,11 +348,28 @@ async def _submit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         saved.state = {}
         await session.commit()
-    await update.effective_message.reply_text(f"Order {order.order_number} submitted for approval.")
+    await update.effective_message.reply_text(
+        f"Order {order.order_number} submitted for approval.",
+        reply_markup=reply_keyboard(
+            update.effective_user.id in context.bot_data.get("admin_telegram_ids", set())
+        ),
+    )
+    from petgenics.admin_telegram import notify_admins_new_order
+
+    await notify_admins_new_order(
+        context.bot, order.id, context.bot_data.get("admin_telegram_ids", ())
+    )
 
 
 async def _text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _maybe_admin_input(update, context):
+        return
     user_id = update.effective_user.id
+    if user_id in context.bot_data.get("admin_telegram_ids", set()):
+        await update.effective_message.reply_text(
+            "No admin text action is waiting. Use /admin to open the admin panel."
+        )
+        return
     text = (update.effective_message.text or "").strip()
     async with SessionLocal() as session:
         salesperson = await _salesperson(session, user_id)
@@ -772,11 +815,13 @@ def build_bot(
     max_upload_bytes: int,
     scanner_retention_hours: int,
     admin_telegram_ids: tuple[int, ...] = (),
+    report_utc_offset_minutes: int = 330,
 ) -> Application:
     application = Application.builder().token(token).build()
     application.bot_data["max_upload_bytes"] = max_upload_bytes
     application.bot_data["scanner_retention_hours"] = scanner_retention_hours
     application.bot_data["admin_telegram_ids"] = set(admin_telegram_ids)
+    application.bot_data["report_utc_offset_minutes"] = report_utc_offset_minutes
     application.add_handler(CommandHandler("myid", my_id))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("adminorder", admin_order))
@@ -795,5 +840,49 @@ def build_bot(
     application.add_handler(CommandHandler("submit", _submit))
     application.add_handler(CallbackQueryHandler(_callback))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, _document))
+    button_pattern = "^(?:" + "|".join(re.escape(label) for label in ALL_BUTTON_LABELS) + ")$"
+    application.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(button_pattern), _handle_menu_button)
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _text))
     return application
+
+
+async def _maybe_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    from petgenics.admin_telegram import handle_admin_text
+
+    return await handle_admin_text(update, context)
+
+
+async def _handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from petgenics.admin_telegram import admin_menu, admin_report
+
+    message = update.effective_message
+    action = MENU_ACTIONS.get((message.text or "").strip())
+    context.user_data.pop("admin_input", None)
+    context.user_data.pop("admin_import_kind", None)
+    is_admin = update.effective_user.id in context.bot_data.get("admin_telegram_ids", set())
+    if action == "admin":
+        if not is_admin:
+            await message.reply_text("Administrator access is required.")
+            return
+        await admin_menu(update, context)
+    elif action == "report_today":
+        if not is_admin:
+            await message.reply_text("Administrator access is required.")
+            return
+        await admin_report(update, context)
+    elif action == "new_order":
+        await _new_order(update, context)
+    elif action == "cart":
+        await _cart(update, context)
+    elif action == "switch_brand":
+        await _switch_brand(update, context)
+    elif action == "submit":
+        await _submit(update, context)
+    elif action == "back":
+        await _back(update, context)
+    elif action == "cancel":
+        await _cancel(update, context)
+    elif action == "help":
+        await _help(update, context)
